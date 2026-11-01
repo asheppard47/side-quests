@@ -14,23 +14,45 @@ description: >
 Run the CLI in this repo. Do not reimplement scoring.
 
 **Never grade the session you are currently in.** The invoking chat is a
-probe, not a work session. Use automatic selection only when the invoking
-session can be reliably identified and excluded. The CLI recognizes harness
-session IDs, but its recency fallbacks do not prove identity; see
-[selection limits](docs/engineering/architecture.md#auto-pick-selection-and-limits).
-If exclusion cannot be established, abstain and explain the limitation.
-When exclusion is reliable, omit the path to select another work session
-from today, with a one-week fallback. Do not pass the current transcript
-path, uuid, or rollout file.
+probe, not a work session.
+
+## Establish who invoked you
+
+The CLI recognizes the invoking session by these environment variables:
+`GROK_SESSION_ID`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`, `CLAUDE_SESSION_ID`,
+`CLAUDE_CODE_SESSION_ID`. Before an auto-pick, check which one your harness
+set. Claude Code sets `CLAUDE_CODE_SESSION_ID` (observed 2026-11-01); the CLI
+recognizes no Gemini CLI variable, so a Gemini-invoked pick is always heuristic.
+
+- **An id is set**: auto-pick excludes that session by id, and an explicit
+  path or id prefix that matches it is refused with an error. The match reads
+  the transcript's own session id and follows symlinks, so an alias or a
+  renamed copy of the live session is refused as well.
+- **No id is set**: auto-pick still runs, but it excludes the newest session
+  of every harness and the newest Claude transcript in this project as a
+  heuristic. The pick note says so. Tell the user the exclusion was a guess,
+  not identity, and name the session that was graded.
+
+When the user says "this session", "grade this session" or "roast this
+session", say which session you graded (its id prefix and length from the
+card) and that it is not the chat you are in. Never grade another session
+silently in its place.
 
 ```bash
-python3 grade_session.py --png      # juicy session from today; write cropped PNG and open it
-python3 grade_session.py <uuid>     # a specific other session (not the live one)
-python3 grade_session.py path/to/session.jsonl
-python3 grade_session.py --html     # HTML only
-python3 grade_session.py --share    # copy a caption locally; user pastes to X
+python3 grade_session.py --png                  # auto-pick from today; cropped PNG + HTML
+python3 grade_session.py <id-prefix> --png      # a specific other session: session first
+python3 grade_session.py path/to/session --png  # a file, or a Grok session dir
+python3 grade_session.py --html                 # HTML only
+python3 grade_session.py --share                # copy a caption locally; user pastes to X
 python3 test_grade_session.py
 ```
+
+Put the session before the flags: `--png` and `--html` take an optional
+destination, and they refuse one that does not end in `.png` or `.html`, so
+`--png a3a4d4fb` is an error rather than an auto-pick. Existing card files are
+never overwritten unless you pass `--force`; where the folder cannot create a
+file exclusively, the write fails instead of risking an overwrite. `--tz`
+fixes the zone Night Shift reads hours in; the card stamps the zone used.
 
 A Codex rollout file, a Grok session directory, or a Gemini chat file works
 the same way when the user names a specific *other* session. The card stamps
@@ -48,7 +70,9 @@ parsing only**. The scoring contract is not yours to improve in passing.
 
 **Allowed**
 - Adapter / event-normalization fixes in `harness_adapters.py` so a real session
-  shape maps onto the existing event contract
+  shape maps onto the existing event contract. A repair must not change any
+  score for a session shape that already parsed correctly; if it would, that is
+  a scoring change and needs an owner decision and a new scoring-version string
 - Fail-open on unknown records, unknown tool outcomes, and missing fields
 - Tests that pin the new session shape (fixture + expected counts)
 - Docs that describe the newly observed transcript field
@@ -66,6 +90,18 @@ parsing only**. The scoring contract is not yours to improve in passing.
 If a format change makes a modifier unobservable, leave it unawarded. Do not
 invent a proxy metric.
 
+**Tool names.** Every `tool_call` event carries an allowlisted display `name`
+(from `KNOWN_TOOLS`; MCP tools become `MCP`, anything else `Other`) and one
+canonical `cls`: `shell`, `read`, `edit`, `agent`, `ask`, `plan`, or `other`.
+Modifiers read the class, never a harness's raw tool name, and `command` is set
+only for `shell`-class calls. A new built-in tool gets a `KNOWN_TOOLS` row with
+its class; a raw name never reaches a card.
+
+**Out of repair scope.** A privacy, card-field, or renderer defect you find
+while repairing an adapter (a leak, an injection, a network request from the
+PNG renderer) is reported to the owner for a decision. Do not patch it as part
+of an adapter repair.
+
 The allowlist, privacy contract, and scoring model are the intent. A green test
 suite after an adapter fix is necessary and not sufficient: also confirm a real
 file from that harness still grades, and that HTML contains no `http` badge
@@ -73,11 +109,12 @@ source.
 
 ## How to invoke
 
-If the user specifies a known other session, pass its path or UUID prefix to
-`python3 grade_session.py --png`. Otherwise, after establishing invoker
-exclusion, run that command with no session argument from this repo root.
-If exclusion cannot be established, abstain and explain the limitation.
-That writes a cropped PNG of the card (local Chrome, no upload) and
-opens it. Do not add a light or paper frame around the image. Show the ANSI
-card too. Do not explain the skip/pick note unless the user asks how the
-session was chosen. Do not post the image; the user does.
+If the user names a known other session, run
+`python3 grade_session.py <id-prefix or path> --png`. Otherwise run
+`python3 grade_session.py --png` from this repo root, after checking the
+invoker id as above. That writes a cropped PNG of the card (local Chrome with
+its network services off, no upload) and opens it. Do not add a light or paper
+frame around the image. Show the ANSI card too. Relay the pick note when it
+says the exclusion was heuristic, or when the user asked about "this session";
+otherwise mention it only if the user asks how the session was chosen. Do not
+post the image; the user does.

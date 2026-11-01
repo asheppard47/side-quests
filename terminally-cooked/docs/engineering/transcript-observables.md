@@ -4,7 +4,7 @@ schema_version: 2
 title: "Transcript Observables"
 doc_type: detail
 parent: docs/engineering/INDEX.md
-last_updated: 2026-09-12
+last_updated: 2026-11-01
 last_audit: 2026-08-19
 audit_status: needs-review
 domain: docs
@@ -30,15 +30,15 @@ Other supported harnesses have different stores and record shapes; see [harness-
 |---|---|---|
 | Tool call | `assistant` record → `message.content[]` with `type: tool_use` | carries tool `name`, `id`, and `input` |
 | Tool result | `user` record → `message.content[]` with `type: tool_result` | `is_error` is the green/red signal; `tool_use_id` pairs it to its call |
-| Human turn | `user` record whose `message.content` is a string | distinguishes human input from tool results |
+| Human turn | `user` record whose `message.content` is a string, or a block list with no `tool_result` | text the harness attaches to a tool-result record (`<system-reminder>`) is not a human turn; one human event per record |
 | Interruption | interrupt marker text inside a user message | counts as human braking |
 | Model | `assistant.message.model` | synthetic entries prefixed `<` are excluded |
 | Effort | `assistant.effort` | descriptive only, never scored |
 | Token usage | `assistant.message.usage` | input, cache-read and cache-creation summed as input; output separate |
 | Permission mode | `permission-mode` record → `permissionMode` | `bypassPermissions` = YOLO MODE, `plan` = plan entry |
-| Compaction | any record with `isCompactSummary: true` | the verified marker |
+| Compaction | any record with `isCompactSummary: true` | the verified marker; the summary record is not also counted as a human turn |
 | Timestamps | `timestamp` on most records | duration, night-shift hours, window bucketing |
-| Test tallies | text of a tool result whose command looks like a test run | gated by command shape |
+| Test tallies | text of a tool result whose command is a lone recognized test-runner invocation | gated by runner invocation; reads, echoes and compound commands (chains after the runner, non-filter pipeline commands, filter options outside the allowlist, substitution, input redirection, stdout redirection) never count |
 
 ## Corrections worth remembering
 
