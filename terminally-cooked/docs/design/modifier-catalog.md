@@ -4,7 +4,7 @@ schema_version: 2
 title: "Modifier Catalog"
 doc_type: detail
 parent: INDEX.md
-last_updated: 2026-08-19
+last_updated: 2026-11-01
 last_audit: 2026-08-19
 audit_status: current
 domain: docs
@@ -16,7 +16,7 @@ triggers:
 ---
 # Modifier Catalog
 
-**Twenty-four modifiers in three classes: chains multiply the core score, debuffs divide it, and flavor adds flat comedy points.** A modifier's class is a design statement — multiplying is reserved for evidence of serialized success, per [scoring-model.md](./scoring-model.md). Every entry must be computable from a local transcript alone; a joke with no observable does not ship.
+**Twenty-four modifiers in three classes: chains multiply the core score, debuffs divide it, and flavor adds flat comedy points.** A modifier's class is a design statement — multiplying is reserved for evidence of serialized success, per [scoring-model.md](./scoring-model.md). Every entry must be computable from a local transcript alone; a joke with no observable does not ship. Tool-based triggers read the canonical tool classes the adapters emit (`shell`, `read`, `edit`, `agent`, `ask`, `plan`; see [harness-adapters.md](./harness-adapters.md#canonical-tool-classes)), so every harness can earn them; a tool the adapter does not recognize counts as `other` and triggers nothing.
 
 ## Chains — multiply, capped at 6.0 product
 
@@ -36,10 +36,10 @@ The streak group (first three rows) is mutually exclusive: only the strongest ap
 |---|---|---|---|
 | Red Wedding | test failure count increased | ×0.6 | ☠ |
 | Error Spiral | ≥4 consecutive errors | ×0.7 | ↺ |
-| Doom Loop | identical Bash command failed ≥3 times; a successful rerun of a Bash command resets the run (intervening Reads do not — retrying after looking around is the joke) | ×0.7 | ↻ |
+| Doom Loop | identical shell command failed ≥3 times; a successful shell command resets the run (intervening reads, edits and other non-shell tools do not — retrying after looking around is the joke) | ×0.7 | ↻ |
 | Backseat Driver | ≥3 human interruptions | ×0.8 | ‼ |
-| All Plan No Game | entered plan mode, zero Edit/Write tool calls (edits made via Bash or MCP tools are invisible to this trigger — known coarseness) | ×0.8 | ☰ |
-| Twenty Questions | agent asked the human ≥4 questions | ×0.9 | ¿ |
+| All Plan No Game | entered plan mode, zero `edit`-class tool calls (Claude Edit/MultiEdit/Write/NotebookEdit, Codex `apply_patch`, Gemini `write_file`/`replace`, Grok `edit_file`/`write_file`); edits made through shell or MCP tools are invisible to this trigger — known coarseness | ×0.8 | ☰ |
+| Twenty Questions | agent asked the human ≥4 questions (`ask`-class calls: Claude AskUserQuestion, Codex `request_user_input`) | ×0.9 | ¿ |
 | Third Time's the Charm | exactly 3 consecutive errors followed by a successful result (the recovery is required) | ×0.9 | ☘ |
 | Overloaded | tool error matching overloaded / 529 | ×0.9 | ⏻ |
 
@@ -49,14 +49,14 @@ The streak group (first three rows) is mutually exclusive: only the strongest ap
 |---|---|---|---|
 | YOLO MODE | session ran in bypass-permissions mode | +250 | » |
 | Token Bonfire | ≥100M input tokens or ≥1M output tokens | +200 | 🜂 |
-| Night Shift | ≥10 events between 02:00 and 06:00 local | +200 | ☾ |
+| Night Shift | ≥10 events between 02:00 and 06:00 in the stamped zone (`--tz`, default the local offset at the session's first timestamp) | +200 | ☾ |
 | Marathon | session ≥4 hours | +200 | ∞ |
-| Test Whisperer | pass count rose, from test-shaped commands only | +150 | ✓ |
+| Test Whisperer | pass count rose, from recognized test-runner commands only | +150 | ✓ |
 | Speedrun | ≤10 minutes with ≥10 results | +150 | ↯ |
-| Middle Manager | ≥5 subagent delegations | +150 | ⑂ |
+| Middle Manager | ≥5 subagent delegations (`agent`-class calls: Claude Agent/Task, Codex `spawn_agent`) | +150 | ⑂ |
 | Lost the Tapes | survived ≥1 context compaction | +100 | ⌫ |
 | Model Hopper | ≥3 distinct models in one session | +100 | ⇄ |
-| Bookworm | ≥20 file reads and more reads than shell commands | +50 | ¶ |
+| Bookworm | ≥20 `read`-class calls and more of them than `shell`-class calls | +50 | ¶ |
 | Perfectly Balanced | nothing else triggered | +0 | ≍ |
 
 ## Provenance

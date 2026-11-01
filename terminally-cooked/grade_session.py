@@ -17,6 +17,7 @@ import html as html_mod
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import struct
@@ -25,15 +26,16 @@ import sys
 import tempfile
 import time
 import zlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import harness_adapters
 from harness_adapters import (
-    detect_harness, iter_events, session_identity,
+    TOOL_CLASSES, detect_harness, iter_events, session_identity, session_label,
     list_sessions, session_mtime, session_bytes,
 )
 
-SCORING_VERSION = "scoring-v0.5 (entertainment only)"
+SCORING_VERSION = "scoring-v0.6 (entertainment only)"
 CHAIN_PRODUCT_CAP = 6.0     # stacked chain multipliers cap ("within reason")
 STREAK_EXP = 1.5            # serialized-event chain superlinearity
 STREAK_CAP = 100
@@ -48,15 +50,186 @@ PICK_LOOKBACK_DAYS = 7              # if today has only the live session
 PICK_ANALYZE_CAP = 20               # pre-filter by size; do not parse every rollout
 
 # Known-format tally parsing (non-semantic; fails open on no-match).
-TALLY_RE = re.compile(r"(\d+)\s+passed(?:,?\s+(\d+)\s+fail(?:ed|ures?))?", re.IGNORECASE)
+PASSED_RE = re.compile(r"(\d+)\s+passed\b", re.IGNORECASE)
+FAILED_RE = re.compile(r"(\d+)\s+fail(?:ed|ures?)\b", re.IGNORECASE)
+CARGO_RESULT = "test result:"
 OVERLOAD_RE = re.compile(r"overloaded|\b529\b", re.IGNORECASE)
-# Tallies only count when the producing Bash command looks like a test run —
-# otherwise quoted/echoed test numbers (docs, cards, logs) poison the delta.
-TEST_CMD_RE = re.compile(
-    r"pytest|py\.test|unittest|npm (?:run )?(?:test|e2e)|yarn test|pnpm test"
-    r"|go test|cargo test|make test|mvn test|gradle test|playwright|cypress"
-    r"|jest|vitest|phpunit|rspec|ctest|test_|_test|run_suite", re.IGNORECASE)
 INTERRUPT_MARKER = "[Request interrupted"
+
+
+def parse_tally(text):
+    """(passed, failed) from one recognized summary line, or None.
+
+    Counts are read independently, in either order, with comma, semicolon or
+    pipe separators. The last summary-bearing line wins (pytest, jest and
+    vitest end with the suite total); cargo prints one `test result:` line per
+    test binary, so those lines are summed."""
+    if not isinstance(text, str) or not text:
+        return None
+    last, cargo = None, [0, 0, 0]
+    for line in text.splitlines():
+        p, f = PASSED_RE.search(line), FAILED_RE.search(line)
+        if not (p or f):
+            continue
+        tally = (int(p.group(1)) if p else 0, int(f.group(1)) if f else 0)
+        if line.strip().lower().startswith(CARGO_RESULT):
+            cargo = [cargo[0] + tally[0], cargo[1] + tally[1], cargo[2] + 1]
+        last = tally
+    if cargo[2]:
+        return cargo[0], cargo[1]
+    return last
+
+
+# Tallies only count when the producing command is a recognized test-runner
+# invocation; reads, echoes and quoted tallies (docs, cards, logs) never do.
+SHELLS = {"bash", "sh", "zsh", "dash", "fish"}
+PLAIN_WRAPPERS = {"time", "nice", "command", "exec", "env", "npx", "bunx", "pnpx", "nohup"}
+RUN_WRAPPERS = {("uv", "run"), ("poetry", "run"), ("pipenv", "run"), ("bundle", "exec"),
+                ("pnpm", "exec"), ("yarn", "dlx"), ("hatch", "run"), ("pdm", "run")}
+RUNNER_HEADS = {"pytest", "py.test", "jest", "vitest", "phpunit", "rspec", "ctest",
+                "tox", "nox", "cypress"}
+SUBCOMMAND_RUNNERS = {"go", "cargo", "mvn", "gradle", "gradlew", "deno", "dotnet",
+                      "swift", "mix", "playwright"}
+PKG_RUNNERS = {"npm", "yarn", "pnpm", "bun"}
+TEST_SCRIPT_RE = re.compile(r"^(?:test_.*|.*_tests?(?:\.\w+)?|run_suite.*|run_tests?(?:\.\w+)?)$")
+PYTHON_RE = re.compile(r"^python(?:\d+(?:\.\d+)?)?$")
+ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _command_segments(cmd):
+    try:
+        lex = shlex.shlex(cmd.replace("\n", " ; "), posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        return []
+    segs, seg = [], []
+    for tok in tokens:
+        if tok and all(ch in "();&|<>" for ch in tok):
+            if seg:
+                segs.append(seg)
+            seg = []
+        else:
+            seg.append(tok)
+    if seg:
+        segs.append(seg)
+    return segs
+
+
+def _strip_wrappers(toks):
+    while toks:
+        head = os.path.basename(toks[0])
+        if ASSIGN_RE.match(toks[0]) or head in PLAIN_WRAPPERS:
+            toks = toks[1:]
+        elif head == "timeout":
+            toks = toks[1:]
+            while toks and (toks[0].startswith("-") or toks[0][:1].isdigit()):
+                toks = toks[1:]
+        elif len(toks) > 1 and (head, toks[1]) in RUN_WRAPPERS:
+            toks = toks[2:]
+        elif toks[0].startswith("-") and len(toks[0]) > 1:
+            toks = toks[1:]          # wrapper flags such as `npx -y`
+        else:
+            return toks
+    return toks
+
+
+def _is_runner(toks):
+    head = os.path.basename(toks[0])
+    rest = toks[1:]
+    if head in RUNNER_HEADS or TEST_SCRIPT_RE.match(head):
+        return True
+    if PYTHON_RE.match(head):
+        args = [t for t in rest if t != "-u"]
+        if len(args) >= 2 and args[0] == "-m" and args[1] in ("pytest", "unittest"):
+            return True
+        script = next((t for t in args if not t.startswith("-")), None)
+        return bool(script and TEST_SCRIPT_RE.match(os.path.basename(script)))
+    if not rest:
+        return False
+    if head in SUBCOMMAND_RUNNERS:
+        return rest[0] in ("test", "nextest")
+    if head == "make":
+        return rest[0].startswith("test") or rest[0] == "check"
+    if head in PKG_RUNNERS:
+        if rest[0] in ("test", "t"):
+            return True
+        return len(rest) > 1 and rest[0] == "run" and rest[1].startswith(("test", "e2e"))
+    return False
+
+
+def is_test_command(cmd, depth=0):
+    """True when some segment of a shell command invokes a known test runner."""
+    if not isinstance(cmd, str):
+        return False
+    for seg in _command_segments(cmd):
+        toks = _strip_wrappers(seg)
+        if not toks:
+            continue
+        if os.path.basename(toks[0]) in SHELLS:
+            if depth < 2:
+                for i, tok in enumerate(toks[1:-1], 1):
+                    if tok.startswith("-") and "c" in tok:
+                        if is_test_command(toks[i + 1], depth + 1):
+                            return True
+                        break
+            continue
+        if _is_runner(toks):
+            return True
+    return False
+
+
+_FRACTION_RE = re.compile(r"(\d{2}:\d{2}:\d{2})[.,](\d+)")
+_COMPACT_OFFSET_RE = re.compile(r"(T.*[+-]\d{2})(\d{2})$")
+
+
+def parse_ts(ts):
+    """Aware datetime from an ISO-8601 transcript timestamp, or None.
+
+    Python 3.9's fromisoformat accepts neither `Z` nor fraction lengths other
+    than 3 or 6 digits, and harnesses emit both. Naive stamps are read as UTC
+    so they can be compared with aware ones."""
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    t = ts.strip()
+    if t[-1:] in ("Z", "z"):
+        t = t[:-1] + "+00:00"
+    t = _FRACTION_RE.sub(lambda m: m.group(1) + "." + (m.group(2) + "000000")[:6], t, count=1)
+    t = _COMPACT_OFFSET_RE.sub(r"\1:\2", t)
+    try:
+        d = datetime.fromisoformat(t)
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def zone_label(tz):
+    key = getattr(tz, "key", None)
+    if isinstance(key, str):
+        return key
+    off = tz.utcoffset(None) or timedelta(0)
+    mins = int(off.total_seconds() // 60)
+    sign = "+" if mins >= 0 else "-"
+    return f"UTC{sign}{abs(mins) // 60:02d}:{abs(mins) % 60:02d}"
+
+
+def parse_zone(text):
+    """tzinfo from `UTC`, a `±HH:MM` / `±HHMM` offset, or an IANA zone name."""
+    t = str(text).strip()
+    if t.upper() in ("UTC", "Z", "GMT"):
+        return timezone.utc
+    m = re.fullmatch(r"(?:UTC)?([+-])(\d{1,2}):?(\d{2})?", t, re.IGNORECASE)
+    if m:
+        hours, mins = int(m.group(2)), int(m.group(3) or 0)
+        if hours > 23 or mins > 59:
+            raise ValueError(f"bad UTC offset: {t}")
+        off = timedelta(hours=hours, minutes=mins)
+        return timezone(-off if m.group(1) == "-" else off)
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(t)
+    except Exception as exc:
+        raise ValueError(f"unknown time zone: {t}") from exc
 
 
 def iter_records(path):
@@ -77,28 +250,48 @@ def tool_result_text(block):
     return ""
 
 
-def analyze(path, harness=None):
+def _hash_name(root, hash_path):
+    root, hash_path = Path(root), Path(hash_path)
+    if root.is_dir():
+        try:
+            return str(hash_path.relative_to(root))
+        except ValueError:
+            pass
+    return hash_path.name
+
+
+def analyze(path, harness=None, tz=None):
     """Grade one session from any supported harness. Detection is automatic;
-    parsing is delegated to harness_adapters, bookkeeping happens here."""
+    parsing is delegated to harness_adapters, bookkeeping happens here.
+
+    tz fixes the zone Night Shift reads hours in. Default: the local UTC
+    offset at the session's first timestamp, recorded in the stamp so a
+    recompute elsewhere can pass it back with --tz."""
     harness = harness or detect_harness(path) or "claude-code"
-    session_id, hash_paths = session_identity(path, harness)
+    label, hash_paths = session_identity(path, harness)
     sha = hashlib.sha256()
     for hash_path in hash_paths:
-        name = Path(hash_path).name.encode()
+        hp = Path(hash_path)
+        name = _hash_name(path, hp).encode()
         sha.update(len(name).to_bytes(4, "big"))
         sha.update(name)
-        size = Path(hash_path).stat().st_size
-        sha.update(size.to_bytes(8, "big"))
-        with open(hash_path, "rb") as fh:      # chunked: transcripts can be huge
+        if hp.is_dir():                         # a checkpoint entry: presence only
+            sha.update((0).to_bytes(8, "big"))
+            continue
+        sha.update(hp.stat().st_size.to_bytes(8, "big"))
+        with open(hp, "rb") as fh:              # chunked: transcripts can be huge
             for chunk in iter(lambda: fh.read(1 << 20), b""):
                 sha.update(chunk)
+    digest = sha.hexdigest()
     s = {
-        "session_id": session_id,
+        "session_id": label[:8] if label else digest[:8],
         "harness": harness,
-        "transcript_sha": sha.hexdigest(),
+        "transcript_sha": digest,
+        "tz": zone_label(tz) if tz else None,
         "models": {},
         "efforts": {},
         "tools": {},
+        "tool_classes": {},
         "green": 0,
         "red": 0,
         "unknown_results": 0,   # tri-state: results with no derivable success flag
@@ -127,61 +320,64 @@ def analyze(path, harness=None):
     tallies = {}       # normalized test command -> [first_tally, last_tally, samples]
     pending = {}       # tool call id -> command string (never rendered)
     last_failed_cmd, doom_run = None, 0
+    t0 = t_max = None
     for ev in iter_events(path, harness):
         ts = ev.get("ts")
-        if ts:
-            s["first_ts"] = s["first_ts"] or ts
+        when = parse_ts(ts)
+        if isinstance(ts, str) and ts:
+            if s["first_ts"] is None:
+                s["first_ts"] = ts
+                t0 = when
             s["last_ts"] = ts
-            try:
-                hour = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().hour
-                if 2 <= hour < 6:
-                    s["night_events"] += 1
-            except ValueError:
-                pass
-        kind = ev["kind"]
+        if when is not None:
+            if tz is None:
+                tz = timezone(when.astimezone().utcoffset() or timedelta(0))
+                s["tz"] = zone_label(tz)
+            if 2 <= when.astimezone(tz).hour < 6:
+                s["night_events"] += 1
+            if t0 is not None and when >= t0 and (t_max is None or when > t_max):
+                t_max = when
+        kind = ev.get("kind")
         if kind == "compaction":
             s["compactions"] += 1
         elif kind == "permission":
-            if ev["mode"] == "bypass":
+            if ev.get("mode") == "bypass":
                 s["yolo_mode"] = True
-            elif ev["mode"] == "plan":
+            elif ev.get("mode") == "plan":
                 s["plan_entries"] += 1
         elif kind == "model":
-            if ev.get("model"):
+            if isinstance(ev.get("model"), str) and ev["model"]:
                 s["models"][ev["model"]] = s["models"].get(ev["model"], 0) + 1
-            if ev.get("effort"):
+            if isinstance(ev.get("effort"), str) and ev["effort"]:
                 s["efforts"][ev["effort"]] = s["efforts"].get(ev["effort"], 0) + 1
         elif kind == "usage":
-            s["tokens_in"] += ev.get("input", 0)
-            s["tokens_out"] += ev.get("output", 0)
+            s["tokens_in"] += int(ev.get("input") or 0)
+            s["tokens_out"] += int(ev.get("output") or 0)
         elif kind == "human":
             s["user_prompts"] += 1
             cook = 0
         elif kind == "interrupt":
             s["interruptions"] += 1
         elif kind == "tool_call":
-            name = ev.get("name", "?")
+            name = safe_meta(ev.get("name") or "Other") or "Other"
             s["tools"][name] = s["tools"].get(name, 0) + 1
+            cls = ev.get("cls") if ev.get("cls") in TOOL_CLASSES else "other"
+            s["tool_classes"][cls] = s["tool_classes"].get(cls, 0) + 1
             if isinstance(ev.get("command"), str):
                 pending[ev.get("id")] = ev["command"].strip()
         elif kind == "tool_result":
             success = ev.get("success")
-            if ts and s["first_ts"] and success is not None:
+            if when is not None and t0 is not None and success is not None:
                 # unknown outcomes must not populate "clean" windows either —
                 # they touch neither positive nor negative chains, anywhere
-                try:
-                    t0 = datetime.fromisoformat(s["first_ts"].replace("Z", "+00:00"))
-                    tn = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    wi = int((tn - t0).total_seconds() // WINDOW_SECS)
-                    if wi >= 0:  # out-of-order timestamps never land in a bucket
-                        w = windows.setdefault(wi, [0, 0])
-                        w[0] += 1
-                        if success is False:
-                            w[1] += 1
-                except ValueError:
-                    pass
+                wi = int((when - t0).total_seconds() // WINDOW_SECS)
+                if wi >= 0:  # out-of-order timestamps never land in a bucket
+                    w = windows.setdefault(wi, [0, 0])
+                    w[0] += 1
+                    if success is False:
+                        w[1] += 1
             cmd = pending.pop(ev.get("id"), None)
-            text = ev.get("text", "")
+            text = ev.get("text") if isinstance(ev.get("text"), str) else ""
             if success is None:
                 # tri-state: unknown outcomes touch neither streaks nor spirals
                 s["unknown_results"] += 1
@@ -208,28 +404,31 @@ def analyze(path, harness=None):
                 if spiral == 3:
                     s["charm"] = True   # exactly three errors, then this success
                 spiral = 0
-            if success is not None and cmd is not None and TEST_CMD_RE.search(cmd):
-                m = TALLY_RE.search(text)
-                if m:
-                    tally = (int(m.group(1)), int(m.group(2) or 0))
+            if success is not None and cmd is not None and is_test_command(cmd):
+                tally = parse_tally(text)
+                if tally:
                     # per-command tracking: deltas only compare like with like,
                     # so a full-suite run followed by one focused test can't
                     # register as a fictional regression
                     entry = tallies.setdefault(" ".join(cmd.split()), [tally, tally, 0])
                     entry[1] = tally
                     entry[2] += 1
-    # pick the tally pair from the most-sampled test command (>=2 samples),
-    # so first/last always describe the same suite
-    picked = max(tallies.values(), key=lambda e: e[2], default=None)
+    if s["tz"] is None:
+        s["tz"] = zone_label(tz or timezone.utc)
+    # the tally pair comes from the most-sampled test command; ties go to the
+    # larger suite, so first/last always describe the same, biggest run
+    picked = max(tallies.values(),
+                 key=lambda e: (e[2], max(sum(e[0]), sum(e[1]))), default=None)
     if picked and picked[2] >= 2:
         s["first_tally"], s["last_tally"] = picked[0], picked[1]
     elif picked:
         s["first_tally"] = s["last_tally"] = picked[1]   # single run: shown, no delta
-    # only COMPLETED windows qualify: the in-progress final bucket is excluded,
+    # only COMPLETED windows qualify: every bucket before the one holding the
+    # session's latest timestamp has elapsed; that final bucket never counts,
     # so "three 20-minute windows" cannot be earned in twenty-one minutes
-    last_bucket = max(windows) if windows else -1
+    final_bucket = int((t_max - t0).total_seconds() // WINDOW_SECS) if t_max else 0
     run = best = sparse = 0
-    for i in range(last_bucket):
+    for i in range(final_bucket):
         ev, er = windows.get(i, (0, 0))
         if ev >= WINDOW_MIN_EVENTS and er == 0:
             run += 1
@@ -302,6 +501,9 @@ def logo_data_uri():
 
 
 SAFE_META_RE = re.compile(r"[^A-Za-z0-9._+\- ]")
+CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+HARNESSES = ("claude-code", "codex", "grok", "gemini")
 
 
 def safe_meta(value, limit=40):
@@ -310,17 +512,38 @@ def safe_meta(value, limit=40):
     return SAFE_META_RE.sub("", str(value))[:limit]
 
 
+def clean(value):
+    """Drop terminal controls and bidi overrides from any rendered string."""
+    return CONTROL_RE.sub("", str(value))
+
+
 def meta_names(d):
     return ", ".join(safe_meta(k) for k in sorted(d, key=d.get, reverse=True))
 
 
+def card_fields(s):
+    """The only dynamic values a card, caption, or output filename may show,
+    each re-validated here whatever produced the stats dict."""
+    sid = re.sub(r"[^0-9a-f]", "", str(s.get("session_id", "")).lower())[:8] or "unknown"
+    date = str(s.get("first_ts") or "")[:10]
+    tools = sorted(((safe_meta(k, 24) or "Other", int(v)) for k, v in s.get("tools", {}).items()),
+                   key=lambda kv: -kv[1])[:6]
+    return {
+        "sid": sid,
+        "date": date if DATE_RE.fullmatch(date) else "?",
+        "models": meta_names(s.get("models", {})),
+        "efforts": meta_names(s.get("efforts", {})),
+        "tools": "  ".join(f"{k}:{v}" for k, v in tools),
+        "harness": s.get("harness") if s.get("harness") in HARNESSES else "unknown",
+        "tz": re.sub(r"[^A-Za-z0-9_+\-/:]", "", str(s.get("tz") or "?"))[:40],
+    }
+
+
 def duration_minutes(s):
-    try:
-        t0 = datetime.fromisoformat(s["first_ts"].replace("Z", "+00:00"))
-        t1 = datetime.fromisoformat(s["last_ts"].replace("Z", "+00:00"))
-        return max(1, int((t1 - t0).total_seconds() // 60))
-    except (AttributeError, ValueError, TypeError):
+    t0, t1 = parse_ts(s.get("first_ts")), parse_ts(s.get("last_ts"))
+    if t0 is None or t1 is None:
         return None
+    return max(1, int((t1 - t0).total_seconds() // 60))
 
 
 def division(s):
@@ -337,7 +560,7 @@ def division(s):
 
 
 def delegation_note(s):
-    n = s["tools"].get("Agent", 0)
+    n = s.get("tool_classes", {}).get("agent", 0)
     return f"delegation: {n} subagent call(s) · internals not graded" if n else None
 
 
@@ -349,7 +572,7 @@ def pick_buffs(s):
     Values are jokes, not measurement."""
     buffs = []  # (name, kind, value, line)
     total = s["green"] + s["red"]
-    tools = s["tools"]
+    cls = s.get("tool_classes", {})    # canonical classes, so every harness can earn these
     mins = duration_minutes(s)
 
     # chains (serialized skill -> multiplies)
@@ -374,12 +597,12 @@ def pick_buffs(s):
         buffs.append(("Third Time's the Charm", "debuff", 0.9, "3 straight errors, then grace"))
     if ft and lt and lt[1] > ft[1]:
         buffs.append(("Red Wedding", "debuff", 0.6, f"failures went {ft[1]} -> {lt[1]}"))
-    if tools.get("AskUserQuestion", 0) >= 4:
-        buffs.append(("Twenty Questions", "debuff", 0.9, f"asked the human {tools['AskUserQuestion']} times"))
+    if cls.get("ask", 0) >= 4:
+        buffs.append(("Twenty Questions", "debuff", 0.9, f"asked the human {cls['ask']} times"))
     if s["interruptions"] >= 3:
         buffs.append(("Backseat Driver", "debuff", 0.8, f"human slammed the brakes {s['interruptions']} times"))
-    if s["plan_entries"] >= 1 and tools.get("Edit", 0) + tools.get("Write", 0) == 0:
-        buffs.append(("All Plan No Game", "debuff", 0.8, f"entered plan mode {s['plan_entries']}x, zero Edit/Write calls"))
+    if s["plan_entries"] >= 1 and cls.get("edit", 0) == 0:
+        buffs.append(("All Plan No Game", "debuff", 0.8, f"entered plan mode {s['plan_entries']}x, zero edit/write calls"))
     if s["overloads"] >= 1:
         buffs.append(("Overloaded", "debuff", 0.9, f"the API said no, {s['overloads']}x (rare)"))
     if s["worst_doom_loop"] >= 3:
@@ -398,13 +621,13 @@ def pick_buffs(s):
         buffs.append(("Marathon", "flavor", 200, f"{mins // 60}h {mins % 60}m in the chair"))
     elif mins and mins <= 10 and total >= 10:
         buffs.append(("Speedrun", "flavor", 150, f"in and out in {mins} minutes"))
-    if tools.get("Agent", 0) >= 5:
-        buffs.append(("Middle Manager", "flavor", 150, f"delegated to {tools['Agent']} subagents"))
+    if cls.get("agent", 0) >= 5:
+        buffs.append(("Middle Manager", "flavor", 150, f"delegated to {cls['agent']} subagents"))
     if s["compactions"] >= 1:
         buffs.append(("Lost the Tapes", "flavor", 100, f"survived {s['compactions']} compaction(s); records incomplete"))
     if len(s["models"]) >= 3:
         buffs.append(("Model Hopper", "flavor", 100, f"{len(s['models'])} different models in one session"))
-    reads, bashes = tools.get("Read", 0), tools.get("Bash", 0)
+    reads, bashes = cls.get("read", 0), cls.get("shell", 0)
     if reads >= 20 and reads > bashes:
         buffs.append(("Bookworm", "flavor", 50, f"read {reads} files, touched grass never"))
     if not buffs:
@@ -466,17 +689,15 @@ def fever_bar(s, width=30):
 
 
 def render(s, buffs, final):
+    f = card_fields(s)
     mins = duration_minutes(s)
     dur = f"{mins // 60}h {mins % 60}m" if mins else "unknown"
-    date = (s["first_ts"] or "")[:10]
-    models = meta_names(s["models"])
-    efforts = meta_names(s["efforts"])
     w = 62
     line = "─" * w
     out = []
     out.append(C.dim("┌" + line + "┐"))
-    out.append(C.bold("  TERMINALLY COOKED") + C.dim(f"  ·  session {s['session_id'][:8]}  ·  {date}  ·  {dur}  ·  {division(s)}"))
-    out.append(C.dim(f"  {models}  ·  effort: {efforts}"))
+    out.append(C.bold("  TERMINALLY COOKED") + C.dim(f"  ·  session {f['sid']}  ·  {f['date']}  ·  {dur}  ·  {division(s)}"))
+    out.append(C.dim(f"  {f['models']}  ·  effort: {f['efforts']}"))
     dn = delegation_note(s)
     if dn:
         out.append(C.dim(f"  {dn}"))
@@ -489,12 +710,12 @@ def render(s, buffs, final):
     if ft and lt:
         out.append(C.red(f"  - # {ft[0]} tests passed, {ft[1]} failed"))
         out.append(C.green(f"  + # {lt[0]} tests passed, {lt[1]} failed"))
-    tool_bits = "  ".join(f"{k}:{v}" for k, v in sorted(s["tools"].items(), key=lambda kv: -kv[1])[:6])
-    out.append(C.dim(f"  {tool_bits}"))
+    out.append(C.dim(f"  {f['tools']}"))
     if s["tokens_in"] or s["tokens_out"]:
         out.append(C.dim(f"  tokens: {s['tokens_in']/1e6:,.1f}M in · {s['tokens_out']/1e6:,.2f}M out"))
     out.append(C.dim("├" + line + "┤"))
     for name, kind, value, why in buffs:
+        name, why = clean(name), clean(why)
         glyph = ICONS.get(name, "·")
         if kind == "flavor":
             tag = C.dim(f"+{value}")
@@ -507,31 +728,45 @@ def render(s, buffs, final):
     core, flat = score_parts(s, buffs)
     out.append(C.bold(f"  FINAL: {C.yellow(f'+{final:,}')}")
                + C.dim(f"  (skill {core:,} · comedy {flat:,} · means nothing. share it anyway.)"))
-    out.append(C.dim(f"  {SCORING_VERSION} · adapter {s.get('harness', 'claude-code')} · {fingerprint(s)}"))
+    out.append(C.dim(f"  {SCORING_VERSION} · adapter {f['harness']} · {fingerprint(s)}"))
     out.append(C.dim("└" + line + "┘"))
     return "\n".join(out)
 
 
+CODE_FILES = (Path(__file__).resolve(), Path(harness_adapters.__file__).resolve())
+
+
+def code_hash():
+    """Both modules decide the score: the adapters normalize, this file grades."""
+    h = hashlib.sha256()
+    for f in CODE_FILES:
+        body = f.read_bytes()
+        name = f.name.encode()
+        h.update(len(name).to_bytes(4, "big") + name + len(body).to_bytes(8, "big"))
+        h.update(body)
+    return h.hexdigest()
+
+
 def fingerprint(s):
-    """Verification stamp: recomputing with the official script on the same
-    transcript must reproduce the score. Detects edited numbers and modified
-    scoring code; does not prove the transcript itself is genuine."""
-    code = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:8]
-    return f"recompute: transcript {s['transcript_sha'][:12]} · code {code}"
+    """Verification stamp: recomputing with the official code on the same
+    session files, with the stamped time zone (--tz), must reproduce the
+    score. Detects edited numbers and modified grading code; does not prove
+    the transcript itself is genuine."""
+    sha = re.sub(r"[^0-9a-f]", "", str(s.get("transcript_sha", "")))[:12]
+    return f"recompute: transcript {sha} · code {code_hash()[:8]} · tz {card_fields(s)['tz']}"
 
 
 def render_html(s, buffs, final):
     """Standalone shareable card. Same field allowlist as the ANSI card."""
+    f = card_fields(s)
     mins = duration_minutes(s)
     dur = f"{mins // 60}h {mins % 60}m" if mins else "unknown"
-    date = (s["first_ts"] or "")[:10]
-    models = meta_names(s["models"])
-    efforts = meta_names(s["efforts"])
     total = s["green"] + s["red"]
     pct = round(100 * s["green"] / total) if total else 0
     esc = html_mod.escape
 
     def chip(name, kind, value, why):
+        name, why = clean(name), clean(why)
         glyph = ICONS.get(name, "·")
         tag = (f"+{value}" if kind == "flavor" else f"&times;{round(value, 2)}")
         art = badge_data_uri(name)
@@ -555,11 +790,14 @@ def render_html(s, buffs, final):
                   f' &middot; {s["tokens_out"]/1e6:,.2f}M out</div>')
     core, flat = score_parts(s, buffs)
     note = delegation_note(s)
+    unknown = (f' &middot; <span class="lbl">?{int(s["unknown_results"])} unknown</span>'
+               if s.get("unknown_results") else "")
     logo = logo_data_uri()
     header = (f'<img class="wordmark" src="{logo}" alt="TERMINALLY COOKED">'
               if logo else "<h1>TERMINALLY COOKED</h1>")
     return f"""<!-- terminally-cooked shareable card -->
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="{CARD_CSP}">
 <div style="max-width:560px">
 <style>
 .lg-card{{font-family:'SF Mono',Menlo,monospace;background:#ffcc00;color:#111;border:3px solid #111;border-radius:10px;padding:18px 22px 20px;font-size:15px;line-height:1.45;overflow:hidden}}
@@ -612,22 +850,25 @@ def render_html(s, buffs, final):
 <div class="joke">means nothing. share it anyway.</div>
 </div>
 <div class="evidence">
-<div class="counts"><span class="g">+{s['green']}</span> <span class="lbl">tool results</span> &middot; <span class="r">{s['red']}</span> <span class="lbl">errors</span> &middot; <span class="y">streak {s['longest_streak']}</span></div>
+<div class="counts"><span class="g">+{s['green']}</span> <span class="lbl">tool results</span> &middot; <span class="r">{s['red']}</span> <span class="lbl">errors</span> &middot; <span class="y">streak {s['longest_streak']}</span>{unknown}</div>
 <div class="meter">
 <div class="fever"><i></i></div>
 {tally}</div>
 {tokens}
 </div>
-<div class="meta quiet">session {esc(s['session_id'][:8])} &middot; {esc(date)} &middot; {dur} &middot; {division(s)}</div>
-<div class="meta quiet">{esc(models)} &middot; effort: {esc(efforts)}</div>
+<div class="meta quiet">session {esc(f['sid'])} &middot; {esc(f['date'])} &middot; {dur} &middot; {division(s)}</div>
+<div class="meta quiet">{esc(f['models'])} &middot; effort: {esc(f['efforts'])}</div>
 {f'<div class="meta quiet">{esc(note)}</div>' if note else ''}
+{f'<div class="meta quiet tools">{esc(f["tools"])}</div>' if f['tools'] else ''}
 {rows}
-<div class="fine">{SCORING_VERSION} &middot; adapter {esc(s.get('harness', 'claude-code'))} &middot; {fingerprint(s)}</div>
+<div class="fine">{SCORING_VERSION} &middot; adapter {esc(f['harness'])} &middot; {esc(fingerprint(s))}</div>
 </div></div>
 """
 
 
+CARD_CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'"
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
+PNG_IEND = b"\x00\x00\x00\x00IEND\xaeB`\x82"
 PNG_CHROMA = (255, 0, 255)          # screenshot key; not used in the card
 PNG_FILL = (255, 204, 0)            # #ffcc00 — same as the yellow card; pad is the card, not a frame
 PNG_PAD = 24                        # keep rounded corners off the PNG edge; pad matches the card, not a mat
@@ -637,6 +878,7 @@ def html_page_for_png(fragment):
     """Full document for rasterizing: magenta key around the card."""
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<meta http-equiv='Content-Security-Policy' content=\"{CARD_CSP}\">"
         "<style>html,body{margin:0;padding:24px;background:#ff00ff;}</style>"
         "</head><body>" + fragment + "</body></html>"
     )
@@ -665,8 +907,15 @@ def write_png_rgb(path, rows):
 
 
 def read_png_rgb(path):
-    """Read an 8-bit RGB or RGBA PNG into rows of (r,g,b)."""
-    data = Path(path).read_bytes()
+    """Read an 8-bit RGB or RGBA PNG into rows of (r,g,b). A truncated or
+    corrupt file raises ValueError, never a codec traceback."""
+    try:
+        return _read_png_rgb(Path(path).read_bytes())
+    except (zlib.error, struct.error, IndexError) as exc:
+        raise ValueError(f"truncated or corrupt PNG ({exc})") from exc
+
+
+def _read_png_rgb(data):
     if data[:8] != PNG_SIG:
         raise ValueError("not a PNG")
     pos = 8
@@ -817,8 +1066,37 @@ def find_chrome():
     return None
 
 
-def render_card_png(fragment, dest, chrome=None):
-    """Rasterize the HTML card to a tightly cropped PNG. Local Chrome only."""
+CHROME_OFFLINE_FLAGS = (
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--disable-sync",
+    "--disable-default-apps",
+    "--disable-domain-reliability",
+    "--disable-extensions",
+    "--disable-client-side-phishing-detection",
+    "--disable-breakpad",
+    "--disable-features=OptimizationHints,MediaRouter,Translate,AutofillServerCommunication",
+    "--no-pings",
+    "--no-default-browser-check",
+    "--metrics-recording-only",
+    "--host-resolver-rules=MAP * ~NOTFOUND",
+    "--proxy-server=http://127.0.0.1:9",
+)
+
+
+def _png_complete(path):
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return False
+    return data[:8] == PNG_SIG and data.endswith(PNG_IEND)
+
+
+def render_card_png(fragment, dest, chrome=None, force=False, sources=()):
+    """Rasterize the HTML card to a tightly cropped PNG. Local Chrome only,
+    launched with its background services and name resolution switched off;
+    the page itself carries a CSP that allows only inline styles and data:
+    images."""
     chrome = Path(chrome) if chrome else find_chrome()
     if chrome is None:
         return None
@@ -836,6 +1114,7 @@ def render_card_png(fragment, dest, chrome=None):
             "--headless",
             "--disable-gpu",
             "--no-first-run",
+            *CHROME_OFFLINE_FLAGS,
             f"--user-data-dir={profile}",
             f"--screenshot={raw_png}",
             "--window-size=720,2400",
@@ -848,11 +1127,10 @@ def render_card_png(fragment, dest, chrome=None):
         )
         deadline = time.time() + 20
         try:
+            # done when Chrome exits, or once the file is a whole PNG (IEND);
+            # a file that merely exists may still be mid-write
             while time.time() < deadline:
-                if raw_png.exists() and raw_png.stat().st_size > 100:
-                    time.sleep(0.4)
-                    break
-                if proc.poll() is not None:
+                if proc.poll() is not None or _png_complete(raw_png):
                     break
                 time.sleep(0.1)
             else:
@@ -864,9 +1142,13 @@ def render_card_png(fragment, dest, chrome=None):
                 except OSError:
                     proc.kill()
                 proc.wait(timeout=5)
-        if not raw_png.exists() or raw_png.stat().st_size < 100:
+        if not raw_png.exists():
             raise FileNotFoundError("chrome did not write a screenshot")
-        crop_png_chroma(raw_png, dest)
+        if not _png_complete(raw_png):
+            raise ValueError("chrome wrote an incomplete screenshot")
+        cropped = td / "card.png"
+        crop_png_chroma(raw_png, cropped)
+        write_output(dest, cropped.read_bytes(), force=force, sources=sources)
     return dest
 
 
@@ -894,7 +1176,7 @@ def share_caption(s, buffs, final):
     """Suggested post text from allowlisted fields only. Copied locally; the
     user pastes and posts — the score never rides a URL to anyone's server."""
     core, flat = score_parts(s, buffs)
-    top = " · ".join(f"{ICONS.get(n, '·')} {n}" for n, k, v, _ in buffs[:3])
+    top = " · ".join(f"{ICONS.get(n, '·')} {clean(n)}" for n, k, v, _ in buffs[:3])
     return (f"Terminally Cooked: +{final:,} (skill {core:,} · comedy {flat:,}) — {division(s)}\n"
             f"{top}\n(means nothing. sharing it anyway.) #TerminallyCooked")
 
@@ -927,9 +1209,15 @@ def is_invoking_session(path, live_ids):
     if not live_ids:
         return False
     label = session_label(path)
-    name = Path(path).name
+    name = Path(path).name.lower()
     for i in live_ids:
-        if i == label or i in name or name.startswith(i) or label.startswith(i):
+        i = i.strip().lower()
+        if not i:
+            continue
+        if label and (label == i or (len(i) >= 8 and label.startswith(i))
+                      or (len(label) == 8 and i.startswith(label))):
+            return True
+        if len(i) >= 8 and i in name:
             return True
     return False
 
@@ -939,32 +1227,50 @@ def claude_project_slug(cwd):
     return "".join(ch if ch.isalnum() else "-" for ch in str(Path(cwd)))
 
 
-def live_paths(cands, live_ids=None, env=None, cwd=None):
-    """Sessions this process is currently writing. Env ids win.
+def _store_kind(p):
+    p = Path(p)
+    if p.is_dir():
+        return "grok"
+    if p.name.startswith("rollout-"):
+        return "codex"
+    if p.name.startswith("session-") and p.parent.name == "chats":
+        return "gemini"
+    return "claude-code"
 
-    Claude Code often has no session-id env: fall back to the newest jsonl in
-    this cwd's project folder. Last resort is global newest mtime.
-    """
+
+def live_paths(cands, live_ids=None, env=None, cwd=None):
+    """(sessions to exclude, heuristic?). Pass the UNFILTERED session list.
+
+    A recognized invoker id that matches a session is identity: only that
+    session is excluded. Otherwise the exclusion is a conservative guess,
+    never proof: the newest session of every harness store, plus the newest
+    Claude transcript in this cwd's project folder."""
     env = os.environ if env is None else env
     if live_ids is None:
         live_ids = invoking_ids(env)
     matched = [p for p in cands if is_invoking_session(p, live_ids)]
+    if matched:
+        return matched, False
+    newest = {}
+    for p in cands:
+        kind = _store_kind(p)
+        if kind not in newest or session_mtime(p) > session_mtime(newest[kind]):
+            newest[kind] = p
+    out = list(newest.values())
     slug = claude_project_slug(cwd or Path.cwd())
     same = [p for p in cands if p.suffix == ".jsonl" and p.parent.name == slug]
     if same:
-        newest_here = max(same, key=session_mtime)
-        if newest_here.resolve() not in {p.resolve() for p in matched}:
-            matched.append(newest_here)
-    if matched:
-        return matched
-    if cands:
-        return [max(cands, key=session_mtime)]
-    return []
+        out.append(max(same, key=session_mtime))
+    seen, uniq = set(), []
+    for p in out:
+        if p.resolve() not in seen:
+            seen.add(p.resolve())
+            uniq.append(p)
+    return uniq, True
 
 
-def session_label(path):
-    p = Path(path)
-    return p.name if p.is_dir() else p.stem[-36:] if len(p.stem) >= 36 else p.stem
+def display_label(path):
+    return session_label(path) or "unnamed"
 
 
 def juice_score(s):
@@ -986,28 +1292,33 @@ def juice_score(s):
 
 def pick_juicy_session(home=None, now=None, claude_projects=None, live_ids=None,
                       env=None, cwd=None):
-    """Return (path, skip-note). Never returns the invoking session.
-
-    live_ids come from harness env (GROK_SESSION_ID, CODEX_THREAD_ID, …).
-    When those are absent, fall back to cwd-scoped Claude then newest mtime.
-    """
+    """Return (path, note). Excludes the invoking session by id when the
+    harness exposes one (INVOKER_ENV); otherwise excludes the newest session
+    per harness and in this project, and the note says it was a heuristic."""
     home = Path(home or default_home())
     now = now or datetime.now().astimezone()
     today = now.astimezone().date()
-    cands = [p for p in list_sessions(home, claude_projects) if session_bytes(p) <= MAX_PICK_BYTES]
-    if not cands:
+    every = list_sessions(home, claude_projects)
+    if not every:
         return None, "no session transcripts found"
-    live = live_paths(cands, live_ids, env=env, cwd=cwd)
+    live, heuristic = live_paths(every, live_ids, env=env, cwd=cwd)
     live_resolved = {p.resolve() for p in live}
-    rest = [p for p in cands if p.resolve() not in live_resolved]
-    skipped = ", ".join(session_label(p) for p in live) or "live session"
+    skipped = ", ".join(clean(display_label(p)) for p in live) or "none"
+    if heuristic:
+        lead = ("no invoker session id recognized; skipped the newest session per harness "
+                f"and in this project as possible live sessions (heuristic, not identity proof): {skipped}")
+    else:
+        lead = f"skipped the live invoking session {skipped}"
+    rest = [p for p in every
+            if p.resolve() not in live_resolved and session_bytes(p) <= MAX_PICK_BYTES]
     if not rest:
-        return None, f"skipped live session {skipped}; nothing else to grade"
+        return None, f"{lead}; nothing else to grade"
     cutoff = now.timestamp() - PICK_LOOKBACK_DAYS * 86400
     recent = [p for p in rest if session_mtime(p) >= cutoff] or rest
     midnight = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-    today_files = [p for p in rest if session_mtime(p) >= midnight]
-    lookback_recent = sorted(recent, key=session_mtime, reverse=True)[:PICK_ANALYZE_CAP]
+    today_files = sorted((p for p in rest if session_mtime(p) >= midnight),
+                         key=session_mtime, reverse=True)
+    lookback_recent = sorted(recent, key=session_mtime, reverse=True)
     shortlist, seen = [], set()
     for p in today_files + lookback_recent:
         rp = p.resolve()
@@ -1015,6 +1326,8 @@ def pick_juicy_session(home=None, now=None, claude_projects=None, live_ids=None,
             continue
         seen.add(rp)
         shortlist.append(p)
+        if len(shortlist) >= PICK_ANALYZE_CAP:
+            break
     scored = []
     for p in shortlist:
         try:
@@ -1023,20 +1336,21 @@ def pick_juicy_session(home=None, now=None, claude_projects=None, live_ids=None,
             continue
         scored.append((p, stats, juice_score(stats)))
     if not scored:
-        return None, f"skipped live session {skipped}; no readable sessions"
+        return None, f"{lead}; no readable sessions"
+
     def is_probe(stats):
         mins = duration_minutes(stats) or 1
         return mins < 5
     real = [(p, st, j) for p, st, j in scored if j > 0 and not is_probe(st)]
     probes = [(p, st, j) for p, st, j in scored if j > 0 and is_probe(st)]
+
     def take(rows, days):
         out = []
         for p, stats, j in rows:
-            ts = stats.get("first_ts")
-            try:
-                when = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
-                age = (today - when.date()).days
-            except (ValueError, TypeError, AttributeError):
+            when = parse_ts(stats.get("first_ts"))
+            if when is not None:
+                age = (today - when.astimezone().date()).days
+            else:
                 age = (today - datetime.fromtimestamp(session_mtime(p)).date()).days
             if 0 <= age <= days:
                 out.append((p, stats, j))
@@ -1044,73 +1358,183 @@ def pick_juicy_session(home=None, now=None, claude_projects=None, live_ids=None,
     chosen = (take(real, 0) or take(real, PICK_LOOKBACK_DAYS)
               or take(probes, 0) or take(probes, PICK_LOOKBACK_DAYS))
     if not chosen:
-        return None, f"skipped live session {skipped}; no other sessions today or in the last {PICK_LOOKBACK_DAYS} days"
+        return None, f"{lead}; no other sessions today or in the last {PICK_LOOKBACK_DAYS} days"
     path, stats, _ = max(chosen, key=lambda t: t[2])
     tools = stats["green"] + stats["red"] + stats.get("unknown_results", 0)
-    note = (f"skipped live session {skipped}; "
-            f"picked {session_label(path)} ({tools} results)")
-    return path, note
+    return path, f"{lead}; picked {clean(display_label(path))} ({tools} results)"
 
 
-def find_session(arg, root=None, home=None, claude_projects=None):
+def _refuse_invoker(p):
+    sys.exit(f"refusing to grade the invoking session {clean(display_label(p))}: "
+             "its id matches this process's harness session id. Name a different session.")
+
+
+def find_session(arg, root=None, home=None, claude_projects=None, env=None):
+    live_ids = invoking_ids(env)
     if arg and Path(arg).exists():
-        return Path(arg), None
+        p = Path(arg)
+        if is_invoking_session(p, live_ids):
+            _refuse_invoker(p)
+        return p, None
     home = Path(home or default_home())
     claude_projects = claude_projects or root
-    if arg:  # partial uuid match across harnesses
+    if arg:  # id prefix match across harnesses
+        want = arg.strip().lower()
         for p in list_sessions(home, claude_projects):
-            if session_label(p).startswith(arg) or p.name.startswith(arg):
+            label = session_label(p)
+            if (label and (label.startswith(want) or (len(label) == 8 and want.startswith(label)))) \
+                    or p.name.startswith(arg):
+                if is_invoking_session(p, live_ids):
+                    _refuse_invoker(p)
                 return p, None
-        sys.exit(f"no session matching '{arg}'")
-    path, note = pick_juicy_session(home=home, claude_projects=claude_projects)
+        sys.exit(f"no session matching '{clean(arg)}'")
+    path, note = pick_juicy_session(home=home, claude_projects=claude_projects,
+                                    live_ids=live_ids, env=env)
     if path is None:
         sys.exit(note)
     return path, note
 
 
+class OutputError(Exception):
+    pass
+
+
+def session_sources(path, harness):
+    """Resolved files that make up the graded session, plus a Grok dir root."""
+    _, files = session_identity(path, harness)
+    out = {Path(path).resolve()} | {Path(f).resolve() for f in files}
+    if Path(path).is_dir():
+        out |= {f.resolve() for f in Path(path).rglob("*")}
+    return out
+
+
+def check_output(dest, force=False, sources=()):
+    dest = Path(dest)
+    resolved = dest.resolve()
+    if resolved in set(sources):
+        raise OutputError(f"refusing to write over a source session file: {clean(dest)}")
+    if any(src.is_dir() and resolved.is_relative_to(src) for src in sources):
+        raise OutputError(f"refusing to write inside the source session: {clean(dest)}")
+    if os.path.lexists(dest):
+        if not force:
+            kind = "is a symlink" if os.path.islink(dest) else "already exists"
+            raise OutputError(f"{clean(dest)} {kind}; pass --force to replace it")
+        if dest.is_dir() and not os.path.islink(dest):
+            raise OutputError(f"{clean(dest)} is a directory")
+    if not dest.parent.is_dir():
+        raise OutputError(f"no such directory for {clean(dest)}")
+
+
+def write_output(dest, data, force=False, sources=()):
+    """Atomic write in the destination's directory. Never follows a symlink
+    destination (the link itself is replaced under --force) and never
+    replaces an existing file without --force."""
+    dest = Path(dest)
+    check_output(dest, force, sources)
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".tc-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        mask = os.umask(0)
+        os.umask(mask)
+        os.chmod(tmp, 0o666 & ~mask)    # mkstemp's 0600 would make a share card private
+        if force:
+            os.replace(tmp, dest)
+        else:
+            try:
+                os.link(tmp, dest)          # atomic create: fails if dest appeared
+            except FileExistsError:
+                raise OutputError(f"{clean(dest)} already exists; pass --force to replace it")
+            except OSError:
+                if os.path.lexists(dest):
+                    raise OutputError(f"{clean(dest)} already exists; pass --force to replace it")
+                os.replace(tmp, dest)
+    finally:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+    return dest
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Grade one of your own AI-coding sessions into a comedy results card (local-only, zero-upload). With no path, picks a juicy session from today and never grades the live session that invoked this process.")
-    ap.add_argument("session", nargs="?", help="Path to a session file/dir, a session-uuid prefix, or omit to auto-pick a juicy session from today (never the live invoking session)")
+    ap = argparse.ArgumentParser(description=(
+        "Grade one of your own AI-coding sessions into a comedy results card "
+        "(local-only, zero-upload). With no session argument it auto-picks a juicy "
+        "session from today. When the invoking harness exposes its session id ("
+        + ", ".join(INVOKER_ENV) + ") that session is excluded by id; otherwise the "
+        "newest session per harness and in this project are excluded as a heuristic, "
+        "and the pick note says so."))
+    ap.add_argument("session", nargs="?", help=(
+        "Path to a session file/dir, or a session-id prefix. A target whose id matches "
+        "this process's harness session id is refused. Omit to auto-pick."))
     ap.add_argument("--html", nargs="?", const="", metavar="OUT",
                     help="Also write a shareable standalone HTML card (default: ./terminally-cooked-card-<id>.html)")
     ap.add_argument("--png", nargs="?", const="", metavar="OUT",
-                    help="Write a tightly cropped PNG of the card and open it (also writes HTML). Local Chrome only; nothing is uploaded.")
+                    help="Write a tightly cropped PNG of the card and open it (also writes HTML). "
+                         "Local Chrome, launched with background networking and name resolution off; nothing is uploaded.")
+    ap.add_argument("--force", action="store_true",
+                    help="Replace an existing --html/--png destination (a symlink is replaced, never followed)")
+    ap.add_argument("--tz", metavar="ZONE",
+                    help="Zone for Night Shift hours: UTC, an offset like UTC-07:00, or an IANA name "
+                         "(default: local offset at the session's first timestamp). Stamped on the "
+                         "card; pass the stamped value back to reproduce a score.")
     ap.add_argument("--share", action="store_true",
                     help="Copy a suggested post caption to the clipboard and open a blank X composer. Nothing is transmitted; you paste and post.")
     ap.add_argument("--projects-dir", metavar="DIR",
                     help="Claude Code transcript root (default: $CLAUDE_CONFIG_DIR/projects or ~/.claude/projects). Auto-pick still scans Grok/Codex/Gemini under $HOME.")
     args = ap.parse_args()
+    try:
+        zone = parse_zone(args.tz) if args.tz else None
+    except ValueError as exc:
+        ap.error(str(exc))
     claude_root = projects_dir(args.projects_dir)
     path, note = find_session(args.session, claude_root, home=default_home(),
                               claude_projects=claude_root)
     if note:
-        print(note, file=sys.stderr)
-    s = analyze(path)
+        print(clean(note), file=sys.stderr)
+    harness = detect_harness(path) or "claude-code"
+    try:
+        s = analyze(path, harness, tz=zone)
+    except (OSError, ValueError) as exc:
+        sys.exit(f"could not read session: {clean(exc)}")
     buffs = pick_buffs(s)
     final = score(s, buffs)
     print(render(s, buffs, final))
-    html_text = None
-    html_out = None
+    sid = card_fields(s)["sid"]
+    sources = session_sources(path, harness)
+    html_out = png_out = None
     if args.html is not None or args.png is not None:
-        html_text = render_html(s, buffs, final)
-        html_out = Path(args.html) if args.html else Path(
-            f"terminally-cooked-card-{s['session_id'][:8]}.html")
-        html_out.write_text(html_text)
-        print(f"\nhtml card: {html_out}")
+        html_out = Path(args.html) if args.html else Path(f"terminally-cooked-card-{sid}.html")
     if args.png is not None:
-        png_out = Path(args.png) if args.png else (
-            html_out.with_suffix(".png") if html_out
-            else Path(f"terminally-cooked-card-{s['session_id'][:8]}.png"))
+        png_out = Path(args.png) if args.png else html_out.with_suffix(".png")
+    try:
+        for dest in (html_out, png_out):
+            if dest is not None:
+                check_output(dest, args.force, sources)
+        if html_out and png_out and html_out.resolve() == png_out.resolve():
+            raise OutputError("--html and --png name the same file")
+    except OutputError as exc:
+        sys.exit(f"not writing card: {exc}")
+    html_text = None
+    if html_out is not None:
+        html_text = render_html(s, buffs, final)
         try:
-            written = render_card_png(html_text, png_out)
-        except (OSError, ValueError, subprocess.CalledProcessError, FileNotFoundError) as exc:
-            print(f"png card failed: {exc}", file=sys.stderr)
+            write_output(html_out, html_text, args.force, sources)
+        except (OutputError, OSError) as exc:
+            sys.exit(f"not writing card: {clean(exc)}")
+        print(f"\nhtml card: {clean(html_out)}")
+    if png_out is not None:
+        try:
+            written = render_card_png(html_text, png_out, force=args.force, sources=sources)
+        except (OSError, ValueError, OutputError, subprocess.SubprocessError) as exc:
+            print(f"png card failed: {clean(exc)}", file=sys.stderr)
             written = None
         if written is None and find_chrome() is None:
             print("png card: no local Chrome/Chromium found; HTML was written instead",
                   file=sys.stderr)
         elif written is not None:
-            print(f"png card: {written}")
+            print(f"png card: {clean(written)}")
             open_preview(written)
     if args.share:
         caption = share_caption(s, buffs, final)

@@ -12,21 +12,21 @@ games. The card stamps which adapter produced it.
 ```bash
 git clone https://github.com/asheppard47/side-quests.git
 cd side-quests/terminally-cooked
-python3 grade_session.py            # auto-pick; check the selection limits below
-python3 grade_session.py --png      # also write a tightly cropped PNG and open it
-python3 grade_session.py a3a4d4fb   # session-uuid prefix
-python3 grade_session.py path/to/session.jsonl
-python3 grade_session.py --html     # standalone HTML card
-python3 grade_session.py --share    # copy a caption; you paste it
-python3 test_grade_session.py       # 57 tests
+python3 grade_session.py --png                  # auto-pick from today; cropped PNG + HTML
+python3 grade_session.py --png a3a4d4fb         # a session-id prefix
+python3 grade_session.py --png path/to/session  # a file, or a Grok session dir
+python3 grade_session.py --html                 # standalone HTML card only
+python3 grade_session.py --share                # copy a caption; you paste it
+python3 test_grade_session.py                   # 92 tests
 python3 grade_session.py --help
 ```
 
-Never grade the invoking session. Auto-pick excludes recognized harness IDs and uses recency fallbacks that can exclude the wrong session when identity is uncertain. Use a known other session, or abstain if it cannot be established. See [the selection limits](./docs/engineering/architecture.md#auto-pick-selection-and-limits).
+Never grade the invoking session. When the invoking harness exposes its session id (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, `GROK_SESSION_ID`, and the others `--help` lists), auto-pick excludes that session and an explicit target matching it is refused. Without an id, auto-pick excludes the newest session of every harness and the newest in this project, and its note says the exclusion was a heuristic. See [the selection limits](./docs/engineering/architecture.md#auto-pick-selection-and-limits).
 
 Python 3.9+, stdlib only. Badge PNGs live in `assets/badges/` and ride along
-in the clone. HTML cards embed them as data URIs, so producing a card does not
-hit the network.
+in the clone. HTML cards embed them as data URIs and carry a Content Security
+Policy that allows only inline styles and `data:` images. Card files are never
+overwritten without `--force`.
 
 Point a Codex rollout, a Grok session directory, or a Gemini chat file at the
 same CLI. Clone this repo into your agent's skill path if you want the bundled
@@ -35,9 +35,13 @@ repair when a transcript format drifts.
 
 ## Privacy
 
-Nothing leaves the machine. There is no network code on the grading path. Card
-fields are allowlisted — no prompt text, file paths, repo names, or tool output —
-and a test enforces it. Sharing a card is something you do. Full contract:
+Nothing is uploaded. The grading code has no network client. `--png` launches
+your local Chrome with its background services switched off and every host name
+mapped to nothing, on a page whose CSP blocks remote loads; those are the
+enforced controls, not a network-traffic audit. Card fields are allowlisted (no
+prompt text, file paths, repo names, tool output, or raw tool names), terminal
+control characters are stripped from everything printed, and tests enforce
+both. Sharing a card is something you do. Full contract:
 [docs/product/privacy-contract.md](./docs/product/privacy-contract.md).
 
 ## License
@@ -58,7 +62,9 @@ and a test enforces it. Sharing a card is something you do. Full contract:
 
 ## Status
 
-Scoring v0.5, 24 modifiers, 57 tests. Known coupling: each CLI's session
-format can change. Adapters fail open; breakage is a degraded card, not a
-crash. See
+Scoring v0.6, 24 modifiers, 92 tests. Known coupling: each CLI's session
+format can change. Adapters skip malformed lines, non-object records and record
+types they do not know, so format drift usually shows up as a sparser card. A
+shape the guards do not anticipate can still stop a run with an error; report
+it as an adapter bug. See
 [docs/engineering/transcript-observables.md](./docs/engineering/transcript-observables.md).

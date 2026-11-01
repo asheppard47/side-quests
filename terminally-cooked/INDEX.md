@@ -20,17 +20,17 @@ triggers:
 
 This index is the entry point. Each section below owns one stage of the work and nothing else; every leaf answers its question in its first paragraph.
 
-## Current state (2026-08-20)
+## Current state (2026-11-01)
 
 | Dimension | State |
 |---|---|
-| Code | `grade_session.py` + `harness_adapters.py`, scoring v0.5, 57 test functions |
+| Code | `grade_session.py` + `harness_adapters.py`, scoring v0.6, 92 test functions |
 | License | MIT |
 | Repo | `asheppard47/side-quests`, folder `terminally-cooked/` (renamed from `asheppard47/terminally-cooked` 2026-11-01; old URLs redirect) |
 | Catalog | 24 modifiers across 3 classes — [design/modifier-catalog.md](./docs/design/modifier-catalog.md) |
 | Badge art | Voted winners in `assets/badges/`, inlined as data URIs — [art/voting-protocol.md](./docs/art/voting-protocol.md) |
 | Harnesses | Claude Code, Codex, Grok, Gemini CLI — card stamps the adapter |
-| External review | 2 med-arb waves + a 3-seat adapter validation — [research/review-ledgers.md](./docs/research/review-ledgers.md) |
+| External review | 2 med-arb waves, a 3-seat adapter validation, and a 2-seat code review (2026-11-01) — [research/review-ledgers.md](./docs/research/review-ledgers.md) |
 | Not built | Persistent badges/history, marketing lane |
 
 ## Sections

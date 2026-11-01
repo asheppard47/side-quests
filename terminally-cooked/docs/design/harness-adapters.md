@@ -4,7 +4,7 @@ schema_version: 2
 title: "Harness Adapters — Route-by-Harness Design"
 doc_type: detail
 parent: docs/design/INDEX.md
-last_updated: 2026-09-12
+last_updated: 2026-11-01
 last_audit: 2026-08-20
 audit_status: needs-review
 domain: docs
@@ -63,6 +63,35 @@ read(ref)           -> Iterator[NormalizedEvent] # feeds the 10-observable contr
 
 `analyze()` stays harness-agnostic; the card's identity tuple (ruling D12) already carries the adapter name, so cross-harness cards are visibly different games. Per-harness quirks live entirely inside the adapter: Codex's duplicate user-message streams (choose one canonical source), Grok's directory-per-session layout and in-place rewind truncation, Gemini's project-hash directory naming.
 
+## Canonical tool classes
+
+Adapters never pass a raw tool name on. Each `tool_call` event carries a display `name` from the per-harness `KNOWN_TOOLS` allowlist (`mcp__server__tool` becomes `MCP` with no server name; anything unlisted becomes `Other`) and one canonical `cls`. Modifiers read only the class, so a Codex plan followed by `apply_patch` is an edit, not "All Plan No Game".
+
+| Class | Claude Code | Codex | Grok | Gemini CLI |
+|---|---|---|---|---|
+| `shell` | Bash | shell, shell_command, exec_command, local_shell, exec | run_terminal_command, shell, bash | run_shell_command |
+| `read` | Read, NotebookRead | — (reads go through the shell) | read_file | read_file, read_many_files |
+| `edit` | Edit, MultiEdit, Write, NotebookEdit | apply_patch | edit_file, write_file, create_file | write_file, replace, edit |
+| `agent` | Agent, Task | spawn_agent | — | — |
+| `ask` | AskUserQuestion | request_user_input(_async) | — | — |
+| `plan` | ExitPlanMode, EnterPlanMode, TodoWrite | update_plan | — | write_todos |
+| `other` | every other listed built-in, MCP tools, unknown names | | | |
+
+`command` is set only for `shell`-class calls, so a Codex `apply_patch` body is never mistaken for a command. A blank cell means the harness has no recognized tool of that class; its modifiers stay unawarded rather than guessed.
+
+## Session ids
+
+The card id comes only from an id-shaped name: a Claude `<uuid>.jsonl` stem, the UUID suffix of a Codex `rollout-<ts>-<uuid>.jsonl`, the 8-hex suffix of a Gemini `session-<ts>-<8hex>.jsonl` (the first 8 characters of its `sessionId`, so a full Gemini session UUID also finds the file), or a Grok `<uuid>/` directory. Any other file or directory name is user-chosen text and is replaced on the card and in output filenames by the transcript-hash prefix.
+
+## Normalization rules (v0.6)
+
+- **Non-object records** (`[]`, `null`, a bare string) and non-object nested fields are skipped everywhere, including Codex `session_meta` sniffing during discovery.
+- **Claude Code**: a compaction summary record emits only the compaction event. A user record that carries `tool_result` blocks is not a human turn, even when the harness attached `<system-reminder>` text to it; one human event per record otherwise.
+- **Codex outcomes** come from the tool-output envelope, never from stdout: the header lines before `Output:` carrying `Exit code: N` (shell, apply_patch) or `Process exited with code N` (exec_command), or the older JSON `{"output", "metadata": {"exit_code"}}`. `Script completed`/`Script failed` (code-mode `exec`) and `Process running with session ID` stay unknown. Envelope shapes rechecked against local rollouts on 2026-11-01.
+- **Codex user turns**: when a rollout has `event_msg.user_message` records, those are the human turns; otherwise role-user `response_item` messages count, skipping injected context (`<environment_context>`, `# AGENTS.md instructions`, heartbeats and other tag-wrapped items).
+- **Gemini**: a message repeated under the same id is a snapshot; its model and final token counts count once.
+- **Grok**: tool-result text comes from `updates.jsonl` `tool_call_update` (`rawOutput.output`/`stdout`, else the content text blocks), so test tallies and Overloaded can fire; a call with no captured output has empty text.
+
 ## Shared gotchas the reviewers flagged
 
 - **Every format is internal and version-dependent.** No harness publishes its session log as a contract. Adapters need fixtures per observed version and must fail open (skip what they can't parse) — the same posture the Claude Code parser already takes.
@@ -72,6 +101,6 @@ read(ref)           -> Iterator[NormalizedEvent] # feeds the 10-observable contr
 
 ## Status
 
-**Implemented 2026-08-20** in `harness_adapters.py` (all four adapters + detection), with `analyze()` refactored into a harness-agnostic event consumer. Every schema was re-verified against real local session stores before coding, which corrected two advisory claims: Codex compaction is a top-level `compacted` record (not only `event_msg.context_compacted`), and Gemini files begin with a `sessionId/projectHash/kind` header followed by full-record lines interleaved with `$set` patches (not a `session_metadata` typed record). Gemini message records repeat with the same id as tool calls progress, so the adapter dedupes tool calls by call id. Cross-harness smoke: real Codex, Grok, Gemini and Claude Code sessions all grade; Codex sessions surface tri-state unknowns on the card (`?N unknown`); the adapter name is stamped in the card's provenance line per ruling D12.
+**Implemented 2026-08-20** in `harness_adapters.py` (all four adapters + detection), with `analyze()` refactored into a harness-agnostic event consumer. Every schema was re-verified against real local session stores before coding, which corrected two advisory claims: Codex compaction is a top-level `compacted` record (not only `event_msg.context_compacted`), and Gemini files begin with a `sessionId/projectHash/kind` header followed by full-record lines interleaved with `$set` patches (not a `session_metadata` typed record). Gemini message records repeat with the same id as tool calls progress, so the adapter dedupes tool calls by call id and counts each message's model and tokens once. Cross-harness smoke: real Codex, Grok, Gemini and Claude Code sessions all grade; Codex sessions surface tri-state unknowns on the card (`?N unknown`); the adapter name is stamped in the card's provenance line per ruling D12.
 
-Known v1 simplifications, on purpose: the Grok adapter reads `events.jsonl` + `updates.jsonl` only (no `chat_history.jsonl`) and emits a human turn per `turn_started`. Command text for Doom Loop comes from `updates.jsonl` `rawInput.command` when present; test tallies fail open because `tool_completed` carries no stdout. Usage is the last `turn_completed` snapshot (`inputTokens` already includes cache — same Codex lesson). The Grok recompute stamp frames each file name and length before its bytes. The Gemini adapter treats statuses outside its map as unknown. Auto-pick behavior, candidate limits, invoker uncertainty, and the Codex archive omission are owned by [engineering/architecture.md](../engineering/architecture.md#auto-pick-selection-and-limits). Full advisory transcripts were session-scratchpad artifacts; this doc is the durable format record.
+Known simplifications, on purpose: the Grok adapter reads `events.jsonl` + `updates.jsonl` (and the presence of `compaction_checkpoints/`), not `chat_history.jsonl`, and emits a human turn per `turn_started`. Command and output text for Doom Loop and test tallies come from `updates.jsonl` when present. Usage is the last `turn_completed` snapshot (`inputTokens` already includes cache — same Codex lesson). The Grok recompute stamp frames each file's relative name and length before its bytes and covers the checkpoint entries. The Gemini adapter treats statuses outside its map as unknown. Auto-pick behavior, candidate limits, invoker uncertainty, and the Codex archive omission are owned by [engineering/architecture.md](../engineering/architecture.md#auto-pick-selection-and-limits). Full advisory transcripts were session-scratchpad artifacts; this doc is the durable format record.

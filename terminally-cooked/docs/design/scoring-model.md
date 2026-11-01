@@ -4,7 +4,7 @@ schema_version: 2
 title: "Scoring Model (v0.4)"
 doc_type: detail
 parent: INDEX.md
-last_updated: 2026-08-19
+last_updated: 2026-11-01
 last_audit: 2026-08-19
 audit_status: current
 domain: docs
@@ -71,7 +71,7 @@ The composition matters more than the total: in the second example the two susta
 
 ## What the number does not claim
 
-A tool result that did not error counts as green. That is *execution* success, not task success — a passing command can still be wrong work. Test tallies are only read from commands that look like test runs, which stops a card or a log quoting "86 passed" from poisoning the delta, but the parse remains a heuristic that fails open. Conditions such as model and effort are displayed and never scored. The score is therefore a joke with arithmetic behind it, not a measurement.
+A tool result that did not error counts as green. That is *execution* success, not task success — a passing command can still be wrong work. Test tallies are only read from commands that invoke a recognized test runner (pytest, jest, cargo test, npm test and similar, including behind `cd … &&`, env assignments, `npx`/`uv run` or `bash -lc`), never from reads or echoes, which stops a card or a log quoting "86 passed" from poisoning the delta. Passed and failed counts are read independently from one summary line in either order; the parse remains a heuristic that fails open, and an unrecognized command is simply unscored. Conditions such as model and effort are displayed and never scored. The score is therefore a joke with arithmetic behind it, not a measurement.
 
 ## Canonical unit and comparability (v0.5)
 
@@ -79,8 +79,8 @@ A tool result that did not error counts as green. That is *execution* success, n
 
 Comparability is carried by an identity tuple, not the number alone. A shared card states: scoring version, session **division** (blitz &lt;15 min, sprint &lt;2 h, long haul beyond — labels like chess time controls, never normalizers), **delegation class** (a session with subagent calls prints "internals not graded"), duration, and the recompute stamp. Equal totals from different divisions or delegation classes are different games, and the card says so.
 
-Two rules inside the unit keep it honest: only **completed** 20-minute windows qualify for the sustained-skill chain (the in-progress final bucket never counts, so three windows cannot be earned in twenty-one minutes), and test-tally deltas compare only runs of the **same test command**, so a full suite followed by one focused test cannot register as a fictional regression.
+Two rules inside the unit keep it honest: only **completed** 20-minute windows qualify for the sustained-skill chain (every window before the one holding the session's latest timestamp has elapsed; that final bucket never counts, so three windows cannot be earned in twenty-one minutes), and test-tally deltas compare only runs of the **same test command**, so a full suite followed by one focused test cannot register as a fictional regression. When two commands were sampled equally often, the larger suite supplies the pair.
 
 ## Versioning and recomputation
 
-Every card stamps its scoring version and a recompute identifier: the transcript's SHA-256 prefix plus a hash of the scoring code. Rerunning the official script on the same transcript must reproduce the score, which detects edited numbers and modified scoring code. It does **not** prove a transcript is genuine — a hand-authored transcript hashes just fine. Deterrence against that is economic: the score is explicitly worthless, and no ranking rewards forging it.
+Every card stamps its scoring version and a recompute identifier: a SHA-256 prefix over every session file that feeds the score (for Grok: `events.jsonl`, `updates.jsonl` and the `compaction_checkpoints/` entries), a hash of both grading modules (`grade_session.py` and `harness_adapters.py`), and the time zone Night Shift used. Rerunning the official code on the same files with that zone (`--tz <stamped zone>`) must reproduce the score, which detects edited numbers and modified grading code. The default zone is the local UTC offset at the session's first timestamp, so a recompute in another zone needs `--tz`. It does **not** prove a transcript is genuine — a hand-authored transcript hashes just fine. Deterrence against that is economic: the score is explicitly worthless, and no ranking rewards forging it.

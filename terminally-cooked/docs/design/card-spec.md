@@ -4,7 +4,7 @@ schema_version: 2
 title: "Card Specification"
 doc_type: detail
 parent: INDEX.md
-last_updated: 2026-08-21
+last_updated: 2026-11-01
 last_audit: 2026-08-19
 audit_status: current
 domain: docs
@@ -22,24 +22,24 @@ triggers:
 
 | Field | Source | Example |
 |---|---|---|
-| Session identifier | first 8 chars of the session UUID | `a3a4d4fb` |
+| Session identifier | first 8 chars of the id carried by an id-shaped name (Claude `<uuid>.jsonl`, Codex `rollout-…-<uuid>`, Gemini `session-…-<8hex>`, Grok `<uuid>/`); any other name shows the transcript-hash prefix instead | `a3a4d4fb` |
 | Date | first transcript timestamp, date only | `2026-08-19` |
 | Duration | first-to-last timestamp | `5h 55m` |
 | Models | model names, sanitized | `claude-sonnet-5` |
 | Effort levels | effort values, sanitized | `high` |
-| Event counts | successful tool results, tool errors, longest streak | `+36 tool results / 2 errors / streak 22` |
+| Event counts | successful tool results, tool errors, longest streak, unknown-outcome results when nonzero | `+36 tool results / 2 errors / streak 22 / ?4 unknown` |
 | Test tally pair | first and last test-shaped tallies | `86 tests passed → 129 tests passed` |
-| Tool histogram | tool names and call counts, top 6 | `Bash:17 Read:4` |
+| Tool histogram | allowlisted tool labels and call counts, top 6; MCP tools show as `MCP`, unrecognized names as `Other` | `Bash:17 Read:4 MCP:2` |
 | Token totals | summed usage | `483.3M in · 1.18M out` |
 | Modifiers | name, class, value, reason line | `FLOW STATE ×1.5 — 64 green results without a miss` |
 | Score | final, plus skill and comedy split | `+3,460 (skill 3,060 · comedy 400)` |
-| Provenance | scoring version and recompute stamp | `scoring-v0.4 · recompute: transcript dc89… · code a4a8…` |
+| Provenance | scoring version, adapter, and recompute stamp (transcript hash, code hash, time zone) | `scoring-v0.6 · recompute: transcript dc89… · code a4a8… · tz UTC-07:00` |
 
-Forbidden without exception: prompt text, tool output, file paths, repository names, branch names, working directory, and any raw diff content. `test_html_card_allowlist` enforces this by planting each forbidden category in a fixture and asserting absence in the render.
+Forbidden without exception: prompt text, tool output, file paths, repository names, branch names, working directory, MCP server names, raw tool names, and any raw diff content. The same allowlist governs the caption and the default output filename (`terminally-cooked-card-<id>.html`). `test_html_card_allowlist` enforces this by planting each forbidden category in a fixture and asserting absence in the render.
 
 ## Untrusted fields
 
-Model and effort names originate in the transcript and are therefore attacker-influenced. Both are stripped to `[A-Za-z0-9._+\- ]` and truncated before rendering, which neutralises HTML injection into the share card and terminal-escape injection into the ANSI card. `test_meta_injection_sanitized` covers it.
+Every transcript-originated value is attacker-influenced. Model and effort names are stripped to `[A-Za-z0-9._+\- ]` and truncated; tool names never render raw (only built-in labels, `MCP`, or `Other`); session ids must be id-shaped hex; the date must be `YYYY-MM-DD` or it prints `?`; and control characters and bidi overrides are removed from every rendered string. That neutralises HTML injection into the share card and terminal-escape injection into the ANSI card. `test_meta_injection_sanitized`, `test_tool_names_allowlisted`, `test_untrusted_timestamp_never_renders` and `test_adversarial_cli_render_paths` cover it.
 
 ## Layout contract
 
@@ -47,8 +47,8 @@ The ANSI card is a live CLI readout and keeps log order (header → fever → co
 
 1. **Wordmark** — TERMINALLY COOKED
 2. **Hero score** — display-size gold `+N`, then skill/comedy split and the entertainment line
-3. **Stamp** — session id, date, duration, division; models and effort on the next line
-4. **Counts then fever** — tool results, errors, streak, then the green-to-red bar (ratio of those tool results, not tests)
+3. **Stamp** — session id, date, duration, division; models and effort on the next line; delegation note and tool histogram when present
+4. **Counts then fever** — tool results, errors, streak, and `?N unknown` when any outcome was unknown, then the green-to-red bar (ratio of known tool results, not tests)
 5. **Diff tally** — Claude Code +/- hunk stacked flush under the fever bar at the same width, red gutter touching the bar; first vs last test-run counts (`tests passed` / `failed`), `-` / `+` prefixes, no `#`
 6. **Token totals**
 7. **Modifier list** — glyph, name, value tag, reason (names wrap; they do not ellipsize)
@@ -66,4 +66,4 @@ Painted badge art is produced per modifier at three levels of detail (1024 px, 7
 
 ## Output rules
 
-The HTML card is a self-contained fragment with an explicit `<meta charset="utf-8">` — without it the glyphs render as mojibake, which shipped once and was caught by screenshot review. `--png` rasterizes that card with local Chrome, flood-fills edge-connected magenta (including Chrome's anti-aliased pink) so badge purples stay, and writes a cropped PNG with a short pad of the same card ground (no light frame). Rounded-corner leftovers inside the pad are filled with the card background. The files stay local; nothing transmits them. The skill opens the PNG when grading finishes.
+The HTML card is a self-contained fragment with an explicit `<meta charset="utf-8">` — without it the glyphs render as mojibake, which shipped once and was caught by screenshot review — and a Content Security Policy meta (`default-src 'none'; img-src data:; style-src 'unsafe-inline'`). Existing output files are refused unless `--force`; writes are atomic. `--png` rasterizes that card with local Chrome, flood-fills edge-connected magenta (including Chrome's anti-aliased pink) so badge purples stay, and writes a cropped PNG with a short pad of the same card ground (no light frame). Rounded-corner leftovers inside the pad are filled with the card background. The files stay local; nothing transmits them. The skill opens the PNG when grading finishes.
