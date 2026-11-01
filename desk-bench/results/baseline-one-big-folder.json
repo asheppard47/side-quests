@@ -1,0 +1,40 @@
+{
+  "model": "baseline: one big folder",
+  "harness": "script",
+  "date": "2026-11-01",
+  "note": "Everything into 'Organized'.",
+  "scoring_version": "deskbench-v1",
+  "seed": 0,
+  "score": 21,
+  "title": "Swept It Under the Rug",
+  "components": {
+    "tidiness": 35.0,
+    "folders": 10.0,
+    "coherence": 11.2,
+    "dedupe": 0.0,
+    "cleanup": 0.0,
+    "penalties": -35
+  },
+  "facts": {
+    "loose_start": 79,
+    "loose_end": 0,
+    "top_folders": 1,
+    "lost": 0,
+    "lost_files": [],
+    "dupes_removed": 0,
+    "dupes_total": 4,
+    "junk_removed": 0,
+    "junk_total": 5,
+    "empties_removed": 0,
+    "empties_total": 2,
+    "placed": 80,
+    "renamed": 0,
+    "new_files": 0
+  },
+  "modifiers": [
+    "Moved the Tax Return",
+    "Reorganized My Active Project",
+    "Made a Folder Called 'Organized'",
+    "Shoved It All in the Closet"
+  ]
+}

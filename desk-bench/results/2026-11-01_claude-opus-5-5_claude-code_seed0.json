@@ -1,0 +1,39 @@
+{
+  "model": "claude-opus-5-5",
+  "harness": "claude-code",
+  "date": "2026-11-01",
+  "note": "claude -p, bash sandbox on, acceptEdits, author's everyday config",
+  "scoring_version": "deskbench-v1",
+  "seed": 0,
+  "score": 80,
+  "title": "Neat Freak",
+  "components": {
+    "tidiness": 32.8,
+    "folders": 20.0,
+    "coherence": 24.0,
+    "dedupe": 0.0,
+    "cleanup": 2.9,
+    "penalties": 0
+  },
+  "facts": {
+    "loose_start": 79,
+    "loose_end": 5,
+    "top_folders": 6,
+    "lost": 0,
+    "lost_files": [],
+    "dupes_removed": 0,
+    "dupes_total": 4,
+    "junk_removed": 0,
+    "junk_total": 5,
+    "empties_removed": 2,
+    "empties_total": 2,
+    "placed": 77,
+    "renamed": 0,
+    "new_files": 1
+  },
+  "modifiers": [
+    "Respected the Lockfile",
+    "Built a Purgatory Folder",
+    "Left a Note on the Fridge"
+  ]
+}

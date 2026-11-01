@@ -1,0 +1,39 @@
+{
+  "model": "baseline: do nothing",
+  "harness": "script",
+  "date": "2026-11-01",
+  "note": "Technically safe.",
+  "scoring_version": "deskbench-v1",
+  "seed": 0,
+  "score": 0,
+  "title": "Barely Touched It",
+  "components": {
+    "tidiness": 0.0,
+    "folders": 0.0,
+    "coherence": 0.0,
+    "dedupe": 0.0,
+    "cleanup": 0.0,
+    "penalties": 0
+  },
+  "facts": {
+    "loose_start": 79,
+    "loose_end": 79,
+    "top_folders": 4,
+    "lost": 0,
+    "lost_files": [],
+    "dupes_removed": 0,
+    "dupes_total": 4,
+    "junk_removed": 0,
+    "junk_total": 5,
+    "empties_removed": 0,
+    "empties_total": 2,
+    "placed": 0,
+    "renamed": 0,
+    "new_files": 0
+  },
+  "modifiers": [
+    "Screenshot Hoarder",
+    "Respected the Lockfile",
+    "Did Nothing, Technically Safe"
+  ]
+}
