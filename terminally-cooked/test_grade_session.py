@@ -490,8 +490,8 @@ def test_meta_injection_sanitized():
             result("t", "ok")]
     s = analyze(write_fixture(recs))
     html = render_html(s, pick_buffs(s), 1)
-    assert "<script>" not in html
-    assert "claude-xscriptalert1script" in html  # stripped, not dropped
+    assert "<script>" not in html and "alert" not in html
+    assert "other model" in html  # not a vendor id shape: neutral label, never the text
 
 
 def test_badge_art_embedded_without_paths():
@@ -728,8 +728,9 @@ def _grok_sess(home, sid, n_green, start, minutes, mtime):
     d.mkdir(parents=True)
     (d / "summary.json").write_text("{}")
     recs = []
+    step = min(30, minutes * 60 / max(n_green, 1))   # events stay inside the duration
     for i in range(n_green):
-        ts = (start.timestamp() + i * 30)
+        ts = (start.timestamp() + i * step)
         iso = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         recs.append({"ts": iso, "type": "turn_started", "model_id": "grok-4.6",
                      "yolo_mode": False})
@@ -1604,6 +1605,237 @@ def test_html_shows_unknowns_and_tool_histogram():
     html = render_html(s, pick_buffs(s), 1)
     assert "?1 unknown" in html, html
     assert "shell:1" in html, html
+
+
+
+# ---------------------------------------------------------------- pre-push review (Sol)
+
+LIVE = "5e551000-aaaa-4bbb-8ccc-000000000001"
+
+
+def _refused(arg, env, home):
+    try:
+        gs.find_session(str(arg), home=home, env=env)
+    except SystemExit as e:
+        return "invoking" in str(e.code)
+    return False
+
+
+def test_alias_and_renamed_invoker_are_refused():
+    home = Path(tempfile.mkdtemp())
+    elsewhere = Path(tempfile.mkdtemp())
+    rollout = Path(_codex_file(_codex_call("c", "shell", "ls", "Exit code: 0\nOutput:\n"), sid=LIVE))
+    env = {"CODEX_THREAD_ID": LIVE}
+    link = elsewhere / "other.jsonl"
+    link.symlink_to(rollout)
+    assert _refused(link, env, home), "symlink alias graded the live Codex session"
+    assert analyze(link)["session_id"] == analyze(link)["transcript_sha"][:8]
+    renamed = elsewhere / "renamed.jsonl"
+    os.rename(rollout, renamed)
+    assert _refused(renamed, env, home), "renamed copy graded the live Codex session"
+    claude = elsewhere / "notes.jsonl"
+    _write(claude, [dict(r, sessionId=LIVE) for r in
+                    [prompt(), asst([tool_use("Bash", "t", command="ls")]), result("t", "ok")]])
+    assert _refused(claude, {"CLAUDE_CODE_SESSION_ID": LIVE}, home)
+    g = elsewhere / "my-grok-run"
+    g.mkdir()
+    (g / "summary.json").write_text(json.dumps({"info": {"id": LIVE, "cwd": "/x"}}))
+    _write(g / "events.jsonl", [{"ts": "2026-08-20T10:00:00.000Z", "type": "turn_started"}])
+    assert _refused(g, {"GROK_SESSION_ID": LIVE}, home)
+    gem = elsewhere / "gem.jsonl"
+    _write(gem, [{"sessionId": LIVE, "projectHash": "ff"},
+                 {"id": "m", "timestamp": "2026-08-20T10:00:01.000Z", "type": "user"}])
+    assert _refused(gem, {"CLAUDE_CODE_SESSION_ID": LIVE}, home)
+    other = elsewhere / "other-work.jsonl"
+    _write(other, [dict(r, sessionId=UUID_A) for r in [prompt()]])
+    found, _ = gs.find_session(str(other), home=home, env=env)
+    assert found == other
+
+
+def test_model_and_effort_metadata_allowlisted():
+    recs = [prompt()]
+    for i, (m, e) in enumerate((("acme-private-repo", "acme-secret"),
+                                ("mcp__acme-secret__deploy", "high"),
+                                ("claude-opus-5-5", "xhigh"))):
+        recs.append(asst([tool_use("Bash", f"m{i}", command="ls")], model=m, effort=e))
+        recs.append(result(f"m{i}", "ok"))
+    s = analyze(write_fixture(recs))
+    assert s["models"] == {"other model": 2, "claude-opus-5-5": 1}, s["models"]
+    assert s["efforts"] == {"other": 1, "high": 1, "xhigh": 1}, s["efforts"]
+    assert "Model Hopper" in buff_names(s)
+    buffs = pick_buffs(s)
+    out = gs.render(s, buffs, 1) + gs.render_html(s, buffs, 1) + gs.share_caption(s, buffs, 1)
+    assert "acme" not in out.lower(), "private model or effort text reached the card"
+    for ok in ("claude-opus-5-5", "gpt-6-astra", "gpt-5.4-mini", "o3", "o4-mini", "codex-mini-latest",
+               "gemini-3.8-flash", "grok-4.7", "grok-code-fast-1"):
+        assert gs.display_model(ok) == ok, ok
+    for bad in ("acme-private-repo", "Claude-Opus", "claude-", "claude-a b", "claude-x/y",
+                "claude-" + "a" * 60, "openai/gpt-5", "o-mini", "gpt_5", "other"):
+        assert gs.display_model(bad) == "other model", bad
+    for e in ("minimal", "low", "medium", "high", "xhigh", "max"):
+        assert gs.display_effort(e) == e
+    assert gs.display_effort("ultra") == "other" and gs.display_effort("High") == "other"
+    leaked = dict(_min_s(), models={"acme-private-repo": 1}, efforts={"acme": 1})
+    assert "acme" not in gs.render_html(leaked, [], 1)
+
+
+def test_output_flags_refuse_non_card_extensions():
+    home = Path(tempfile.mkdtemp())
+    work = Path(tempfile.mkdtemp())
+    sess = Path(tempfile.mkdtemp()) / f"{UUID_A}.jsonl"
+    _write(sess, [prompt(), asst([tool_use("Bash", "t", command="ls")]), result("t", "ok")])
+    for flag, ext in (("--png", ".png"), ("--html", ".html")):
+        out = _cli([flag, "a3a4d4fb", "--projects-dir", home], work, {"TERMINALLY_COOKED_HOME": str(home)})
+        assert out.returncode == 2 and ext in out.stderr, (flag, out.returncode, out.stderr)
+        assert "auto-pick" not in out.stderr and "no session" not in out.stderr, out.stderr
+        out = _cli([flag, sess, "--projects-dir", home], work, {"TERMINALLY_COOKED_HOME": str(home)})
+        assert out.returncode == 2, (flag, out.stderr)
+    out = _cli([sess, "--html", "Card.HTML"], work)
+    assert out.returncode == 0 and (work / "Card.HTML").exists(), out.stderr
+    assert sorted(p.name for p in work.iterdir()) == ["Card.HTML"]
+    docs = [Path(__file__).parent / n for n in ("SKILL.md", "README.md")]
+    docs += [Path(__file__).parent / "docs" / "engineering" / "architecture.md"]
+    import re as _re
+    bad = _re.compile(r"grade_session\.py\b[^\n`]*--(?:png|html)\s+(?!-|\[|#|$)(?!\S+\.(?:png|html)\b)\S+",
+                      _re.MULTILINE)
+    for doc in docs:
+        hits = bad.findall(doc.read_text())
+        assert not hits, f"{doc.name} puts a session after --png/--html: {hits}"
+    help_text = _cli(["--help"], work).stdout
+    assert "session first" in help_text.replace("\n", " ").replace("  ", " "), help_text
+
+
+def test_compound_commands_never_score_tallies():
+    poison = 'echo \';\' pytest "$(cat test_report.txt)"'
+    s = _tally_session(["10 passed", "1000 passed"], cmd=poison)
+    assert s["first_tally"] is None, s["first_tally"]
+    s = _tally_session(["10 passed", "1000 passed"], cmd="pytest >/dev/null; cat test_report.txt")
+    assert s["first_tally"] is None, s["first_tally"]
+    s = _tally_session(["10 passed", "12 passed"], cmd="cd x && pytest -q")
+    assert s["first_tally"] == (10, 0) and s["last_tally"] == (12, 0)
+    yes = ["cd x && pytest -q", 'cd "a b" && FOO=1 pytest', "FOO=1 && pytest", "pytest -q 2>&1",
+           "pytest 2>/dev/null", "bash -lc 'cd x && pytest -q'", "pytest -k 'a or b; c'",
+           "cd x && cd y && python3 -m pytest", "pytest\n", "pytest < /dev/null",
+           "pytest | tee log", "pytest -q 2>&1 | tail -20", 'cd x && npm test 2>&1 | grep -E "passed|failed"',
+           "pytest 2>&1 | grep -v warn | tail -n 5", "pytest | head -3", "pytest | sort | cat", "pytest | less",
+           "pytest | tee -a log | tail -5", "pytest | grep -e passed -e failed"]
+    no = ["pytest | echo 1000 passed", "pytest | sh -c 'cat report'", "pytest | cat report.txt",
+          "pytest | grep passed report.txt", "pytest | tail -5 > out", "pytest | tail -5; cat r.txt",
+          "pytest | xargs echo", "pytest | tail $(cat n)", "pytest | printf '9 passed'", "cat r.txt | pytest",
+          "pytest | head -n", "pytest | sort report.txt", "pytest > log", "pytest >> log", "pytest 1>log",
+          "pytest &> log", "pytest >& log", "pytest; echo done", "pytest && cat report.txt",
+          "pytest || true", "pytest &", "echo `pytest`", "pytest $(cat args)", 'pytest "$(cat args)"',
+          "(cd x && pytest)", "cd x; pytest", "make build && pytest", "echo ';' pytest",
+          "cd x y && pytest", "pytest\ncat report.txt", "bash -lc 'pytest; cat r.txt'"]
+    for c in yes:
+        assert gs.is_test_command(c), f"missed runner: {c!r}"
+    for c in no:
+        assert not gs.is_test_command(c), f"scored ambiguous command: {c!r}"
+
+
+def test_valid_json_shapes_do_not_crash():
+    from harness_adapters import detect_harness
+    d = Path(tempfile.mkdtemp())
+    a = d / f"{UUID_A}.jsonl"
+    _write(a, [{"type": [], "payload": {}}, prompt(),
+               asst([tool_use("Bash", "t", command="ls")]), result("t", "ok")])
+    assert detect_harness(a) == "claude-code"
+    assert analyze(a)["green"] == 1
+    out = _cli([a], d)
+    assert out.returncode == 0 and "Traceback" not in out.stderr, out.stderr
+    b = d / "b.jsonl"
+    _write(b, [prompt(), asst([{"type": "tool_use", "name": "Bash", "id": [], "input": {"command": "pytest"}}]),
+               {"type": "user", "timestamp": "2026-08-19T10:01:00.000Z",
+                "message": {"content": [{"type": "tool_result", "tool_use_id": {}, "content": "1 passed"}]}},
+               asst([{"type": ["tool_use"], "name": "Bash", "id": "x"}])])
+    s = analyze(b)
+    assert s["tools"] == {"Bash": 1} and s["first_tally"] is None, (s["tools"], s["first_tally"])
+    rows = [{"timestamp": "2026-08-20T10:00:05.000Z", "type": "response_item",
+             "payload": {"type": "function_call", "call_id": [], "name": "shell",
+                         "arguments": json.dumps({"command": "pytest"})}},
+            {"timestamp": "2026-08-20T10:00:06.000Z", "type": "response_item",
+             "payload": {"type": "function_call_output", "call_id": [], "output": "Exit code: 0\nOutput:\n5 passed"}},
+            {"timestamp": "2026-08-20T10:00:07.000Z", "type": "response_item",
+             "payload": {"type": {}, "role": [], "content": []}},
+            {"timestamp": "2026-08-20T10:00:07.000Z", "type": {"x": 1}, "payload": {"type": "user_message"}}]
+    s = analyze(_codex_file(rows))
+    assert s["green"] == 1 and s["first_tally"] is None, (s["green"], s["first_tally"])
+
+
+def test_final_timestamps_survive_dedup_and_silent_records():
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "session-2026-08-20T10-00-abcd1234.jsonl")
+    calls = [{"id": f"g{i}", "name": "read_file", "args": {}, "status": "success"} for i in range(6)]
+    _write(p, [{"sessionId": "abcd1234", "projectHash": "ff"},
+               {"id": "u", "timestamp": "2026-08-20T10:00:00.000Z", "type": "user"},
+               {"id": "m1", "timestamp": "2026-08-20T10:00:00.000Z", "type": "gemini", "model": "gemini-3.8-flash",
+                "toolCalls": calls},
+               {"id": "m1", "timestamp": "2026-08-20T10:25:00.000Z", "type": "gemini", "model": "gemini-3.8-flash",
+                "toolCalls": calls, "tokens": {"input": 9, "output": 2}}])
+    s = analyze(p)
+    assert s["clean_window_chain"] == 1, s["clean_window_chain"]
+    assert gs.duration_minutes(s) == 25 and s["green"] == 6 and s["models"] == {"gemini-3.8-flash": 1}
+    rows = []
+    for i in range(6):
+        rows += _codex_call(f"c{i}", "shell", "ls", "Exit code: 0\nOutput:\n",
+                            ts=f"2026-08-20T10:00:0{i}.000Z", custom=False)
+    night = gs.parse_zone("-07:00")              # 10:xx UTC is 03:xx here
+    base = analyze(_codex_file(rows), tz=night)
+    assert base["night_events"] > 0
+    final = {"timestamp": "2026-08-20T10:25:00.000Z", "type": "response_item",
+             "payload": {"type": "message", "role": "assistant",
+                         "content": [{"type": "output_text", "text": "done"}]}}
+    reasoning = [{"timestamp": f"2026-08-20T10:0{i}:30.000Z", "type": "response_item",
+                  "payload": {"type": "reasoning", "summary": []}} for i in range(5)]
+    s = analyze(_codex_file(rows + reasoning + [final]), tz=night)
+    assert s["clean_window_chain"] == 1 and gs.duration_minutes(s) == 25, (s["clean_window_chain"], s["last_ts"])
+    for k in ("night_events", "green", "user_prompts", "longest_streak", "longest_cook", "unknown_results"):
+        assert s[k] == base[k], (k, s[k], base[k])
+
+
+def test_codex_xml_prompt_is_a_human_turn():
+    def user(text, ts):
+        return {"timestamp": ts, "type": "response_item",
+                "payload": {"type": "message", "role": "user",
+                            "content": [{"type": "input_text", "text": text}]}}
+    rows = [user("<environment_context>\n  <cwd>/x</cwd>\n</environment_context>", "2026-08-20T10:00:01.000Z"),
+            user("<user_instructions>\nbe terse\n</user_instructions>", "2026-08-20T10:00:01.000Z"),
+            user("# AGENTS.md instructions for /x\n\n<INSTRUCTIONS>", "2026-08-20T10:00:01.000Z"),
+            user("<heartbeat>\n  <automation_id>x</automation_id>\n</heartbeat>", "2026-08-20T10:00:01.000Z"),
+            user("start", "2026-08-20T10:00:02.000Z")]
+    for i in range(30):
+        rows += _codex_call(f"a{i}", "shell", "ls", "Exit code: 0\nOutput:\n", custom=False)
+    rows.append(user("<task>Continue with the next change</task>", "2026-08-20T10:10:00.000Z"))
+    for i in range(30):
+        rows += _codex_call(f"b{i}", "shell", "ls", "Exit code: 0\nOutput:\n",
+                            ts="2026-08-20T10:10:05.000Z", custom=False)
+    s = analyze(_codex_file(rows))
+    assert s["user_prompts"] == 2, s["user_prompts"]
+    assert s["longest_cook"] == 30, s["longest_cook"]
+
+
+def test_no_force_publish_fails_closed_without_hardlinks():
+    import errno
+    d = Path(tempfile.mkdtemp())
+    dest = d / "card.html"
+    real = gs.os.link
+
+    def no_links(*a, **k):
+        raise OSError(errno.EPERM, "Operation not permitted")
+    gs.os.link = no_links
+    try:
+        try:
+            gs.write_output(dest, "card")
+        except gs.OutputError as e:
+            assert "--force" in str(e), e
+        else:
+            raise AssertionError("published without an exclusive create")
+        assert not os.path.lexists(dest)
+        gs.write_output(dest, "card", force=True)
+        assert dest.read_text() == "card"
+    finally:
+        gs.os.link = real
+    assert not [p for p in d.iterdir() if p.name.startswith(".tc-")]
 
 
 

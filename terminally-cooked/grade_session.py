@@ -31,8 +31,8 @@ from pathlib import Path
 
 import harness_adapters
 from harness_adapters import (
-    TOOL_CLASSES, detect_harness, iter_events, session_identity, session_label,
-    list_sessions, session_mtime, session_bytes,
+    TOOL_CLASSES, detect_harness, identity_ids, iter_events, session_identity,
+    session_label, list_sessions, session_mtime, session_bytes,
 )
 
 SCORING_VERSION = "scoring-v0.6 (entertainment only)"
@@ -80,8 +80,9 @@ def parse_tally(text):
     return last
 
 
-# Tallies only count when the producing command is a recognized test-runner
-# invocation; reads, echoes and quoted tallies (docs, cards, logs) never do.
+# Tallies only count when the producing command is a lone recognized
+# test-runner invocation; reads, echoes, quoted tallies and compound commands
+# whose output may not be the runner's never do.
 SHELLS = {"bash", "sh", "zsh", "dash", "fish"}
 PLAIN_WRAPPERS = {"time", "nice", "command", "exec", "env", "npx", "bunx", "pnpx", "nohup"}
 RUN_WRAPPERS = {("uv", "run"), ("poetry", "run"), ("pipenv", "run"), ("bundle", "exec"),
@@ -96,24 +97,134 @@ PYTHON_RE = re.compile(r"^python(?:\d+(?:\.\d+)?)?$")
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
-def _command_segments(cmd):
-    try:
-        lex = shlex.shlex(cmd.replace("\n", " ; "), posix=True, punctuation_chars=True)
-        lex.whitespace_split = True
-        tokens = list(lex)
-    except ValueError:
-        return []
-    segs, seg = [], []
-    for tok in tokens:
-        if tok and all(ch in "();&|<>" for ch in tok):
-            if seg:
-                segs.append(seg)
-            seg = []
-        else:
-            seg.append(tok)
-    if seg:
-        segs.append(seg)
+class _Ambiguous(Exception):
+    pass
+
+
+def _fd_before(buf):
+    """File descriptor written right before a `>` (`2>`), else 1 (stdout)."""
+    if buf and buf[-1].isdigit() and (len(buf) == 1 or buf[-2] in " \t"):
+        return int(buf[-1])
+    return 1
+
+
+def _shell_segments(cmd):
+    """[(segment text, operator after it)] split on unquoted control operators.
+
+    Scans the raw string so quoting is respected: a quoted `;` is text, not an
+    operator. Raises _Ambiguous for syntax whose output cannot be attributed to
+    a single command: command substitution, backticks, subshells and
+    redirection of stdout."""
+    segs, buf, quote, i, n = [], [], None, 0, len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if quote == "'":
+            buf.append(ch)
+            quote = None if ch == "'" else quote
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(cmd[i:i + 2])
+            i += 2
+            continue
+        if ch == "`" or cmd.startswith("$(", i):
+            raise _Ambiguous
+        if quote == '"':
+            buf.append(ch)
+            quote = None if ch == '"' else quote
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in "()":
+            raise _Ambiguous
+        if ch == ">":
+            if _fd_before("".join(buf)) != 2:
+                raise _Ambiguous
+            j = i + 1
+            if cmd.startswith(">", j) or cmd.startswith("|", j):
+                j += 1
+            if cmd.startswith("&", j):
+                k = j + 1
+                while k < n and cmd[k].isdigit():
+                    k += 1
+                if cmd[j + 1:k] not in ("1", "2"):
+                    raise _Ambiguous
+                j = k
+            buf.append(cmd[i:j])
+            i = j
+            continue
+        if ch == "&" and cmd.startswith(">", i + 1):
+            raise _Ambiguous                    # `&>`: stdout and stderr to a file
+        if ch in ";&|\n":
+            op = cmd[i:i + 2] if cmd[i:i + 2] in ("&&", "||") else ch
+            segs.append(("".join(buf), op))
+            buf = []
+            i += len(op)
+            continue
+        buf.append(ch)
+        i += 1
+    if quote:
+        raise _Ambiguous
+    segs.append(("".join(buf), None))
     return segs
+
+
+VALUE_FLAGS = {"head": {"-n", "-c"}, "tail": {"-n", "-c"}, "grep": {"-e", "-f", "-m", "-A", "-B", "-C"},
+               "sort": {"-k", "-t", "-o"}}
+
+
+def _is_output_filter(words):
+    """A plain command that only cuts down or copies its stdin: no file it
+    could print instead of the runner's output."""
+    head, args, positional = words[0], words[1:], []
+    if head not in ("tail", "head", "grep", "tee", "cat", "less", "more", "sort"):
+        return False
+    takes = VALUE_FLAGS.get(head, set())
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in takes:
+            i += 2
+            continue
+        if not (a.startswith("-") and len(a) > 1):
+            positional.append(a)
+        i += 1
+    if i > len(args):
+        return False                        # a value flag with no value
+    if head == "tee":
+        return True                         # file arguments are outputs
+    if head == "grep":
+        patterns_by_flag = any(a in ("-e", "-f") for a in args)
+        return len(positional) == (0 if patterns_by_flag else 1)
+    return not positional
+
+
+def _runner_words(cmd):
+    """Words of the one runner segment of `cmd`, or None when the command is
+    not a lone runner after `cd <dir> &&` / `VAR=value &&` prefixes, followed
+    at most by a pipeline of output filters (`| tail -20`, `| grep -E …`)."""
+    try:
+        segs = _shell_segments(cmd.strip())
+        words = [shlex.split(text) for text, _ in segs]
+    except (_Ambiguous, ValueError):
+        return None
+    if not all(words):
+        return None
+    ops = [op for _, op in segs[:-1]]
+    pipe_at = ops.index("|") if "|" in ops else len(ops)
+    if any(op != "&&" for op in ops[:pipe_at]) or any(op != "|" for op in ops[pipe_at:]):
+        return None
+    runner, filters = pipe_at, words[pipe_at + 1:]
+    for w in words[:runner]:
+        if not ((w[0] == "cd" and len(w) == 2) or all(ASSIGN_RE.match(x) for x in w)):
+            return None
+    if not all(_is_output_filter(w) for w in filters):
+        return None
+    return words[runner]
 
 
 def _strip_wrappers(toks):
@@ -159,24 +270,27 @@ def _is_runner(toks):
 
 
 def is_test_command(cmd, depth=0):
-    """True when some segment of a shell command invokes a known test runner."""
+    """True when a shell command is exactly one known test-runner invocation,
+    optionally after `cd <dir> &&` and `VAR=value` prefixes and before a
+    pipeline of output filters. Any other pipeline command, chains after the
+    runner, substitutions and stdout redirection leave the printed tally's
+    origin ambiguous, so they never count."""
     if not isinstance(cmd, str):
         return False
-    for seg in _command_segments(cmd):
-        toks = _strip_wrappers(seg)
-        if not toks:
-            continue
-        if os.path.basename(toks[0]) in SHELLS:
-            if depth < 2:
-                for i, tok in enumerate(toks[1:-1], 1):
-                    if tok.startswith("-") and "c" in tok:
-                        if is_test_command(toks[i + 1], depth + 1):
-                            return True
-                        break
-            continue
-        if _is_runner(toks):
-            return True
-    return False
+    words = _runner_words(cmd)
+    if not words:
+        return False
+    toks = _strip_wrappers(words)
+    if not toks:
+        return False
+    if os.path.basename(toks[0]) in SHELLS:
+        if depth >= 2:
+            return False
+        for i, tok in enumerate(toks[1:-1], 1):
+            if tok.startswith("-") and "c" in tok:
+                return is_test_command(toks[i + 1], depth + 1)
+        return False
+    return _is_runner(toks)
 
 
 _FRACTION_RE = re.compile(r"(\d{2}:\d{2}:\d{2})[.,](\d+)")
@@ -232,24 +346,6 @@ def parse_zone(text):
         raise ValueError(f"unknown time zone: {t}") from exc
 
 
-def iter_records(path):
-    with open(path) as f:
-        for line in f:
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-
-def tool_result_text(block):
-    inner = block.get("content")
-    if isinstance(inner, str):
-        return inner
-    if isinstance(inner, list):
-        return " ".join(x.get("text", "") for x in inner if isinstance(x, dict))
-    return ""
-
-
 def _hash_name(root, hash_path):
     root, hash_path = Path(root), Path(hash_path)
     if root.is_dir():
@@ -288,7 +384,7 @@ def analyze(path, harness=None, tz=None):
         "harness": harness,
         "transcript_sha": digest,
         "tz": zone_label(tz) if tz else None,
-        "models": {},
+        "models": {},          # display labels (display_model), never raw ids
         "efforts": {},
         "tools": {},
         "tool_classes": {},
@@ -321,23 +417,25 @@ def analyze(path, harness=None, tz=None):
     pending = {}       # tool call id -> command string (never rendered)
     last_failed_cmd, doom_run = None, 0
     t0 = t_max = None
+    raw_models = set()
     for ev in iter_events(path, harness):
+        kind = ev.get("kind")
         ts = ev.get("ts")
         when = parse_ts(ts)
-        if isinstance(ts, str) and ts:
-            if s["first_ts"] is None:
-                s["first_ts"] = ts
-                t0 = when
-            s["last_ts"] = ts
         if when is not None:
+            if t0 is None:
+                t0, s["first_ts"] = when, ts
+            if when >= t0 and (t_max is None or when > t_max):
+                t_max, s["last_ts"] = when, ts
             if tz is None:
                 tz = timezone(when.astimezone().utcoffset() or timedelta(0))
                 s["tz"] = zone_label(tz)
-            if 2 <= when.astimezone(tz).hour < 6:
+            if kind != "tick" and 2 <= when.astimezone(tz).hour < 6:
                 s["night_events"] += 1
-            if t0 is not None and when >= t0 and (t_max is None or when > t_max):
-                t_max = when
-        kind = ev.get("kind")
+        if kind == "tick":
+            continue
+        cid = ev.get("id")
+        cid = cid if isinstance(cid, (str, int)) and not isinstance(cid, bool) else None
         if kind == "compaction":
             s["compactions"] += 1
         elif kind == "permission":
@@ -347,9 +445,12 @@ def analyze(path, harness=None, tz=None):
                 s["plan_entries"] += 1
         elif kind == "model":
             if isinstance(ev.get("model"), str) and ev["model"]:
-                s["models"][ev["model"]] = s["models"].get(ev["model"], 0) + 1
+                raw_models.add(ev["model"])
+                m = display_model(ev["model"])
+                s["models"][m] = s["models"].get(m, 0) + 1
             if isinstance(ev.get("effort"), str) and ev["effort"]:
-                s["efforts"][ev["effort"]] = s["efforts"].get(ev["effort"], 0) + 1
+                e = display_effort(ev["effort"])
+                s["efforts"][e] = s["efforts"].get(e, 0) + 1
         elif kind == "usage":
             s["tokens_in"] += int(ev.get("input") or 0)
             s["tokens_out"] += int(ev.get("output") or 0)
@@ -363,8 +464,8 @@ def analyze(path, harness=None, tz=None):
             s["tools"][name] = s["tools"].get(name, 0) + 1
             cls = ev.get("cls") if ev.get("cls") in TOOL_CLASSES else "other"
             s["tool_classes"][cls] = s["tool_classes"].get(cls, 0) + 1
-            if isinstance(ev.get("command"), str):
-                pending[ev.get("id")] = ev["command"].strip()
+            if isinstance(ev.get("command"), str) and cid is not None:
+                pending[cid] = ev["command"].strip()
         elif kind == "tool_result":
             success = ev.get("success")
             if when is not None and t0 is not None and success is not None:
@@ -376,7 +477,7 @@ def analyze(path, harness=None, tz=None):
                     w[0] += 1
                     if success is False:
                         w[1] += 1
-            cmd = pending.pop(ev.get("id"), None)
+            cmd = pending.pop(cid, None) if cid is not None else None
             text = ev.get("text") if isinstance(ev.get("text"), str) else ""
             if success is None:
                 # tri-state: unknown outcomes touch neither streaks nor spirals
@@ -413,6 +514,7 @@ def analyze(path, harness=None, tz=None):
                     entry = tallies.setdefault(" ".join(cmd.split()), [tally, tally, 0])
                     entry[1] = tally
                     entry[2] += 1
+    s["model_count"] = len(raw_models)   # Model Hopper counts ids, never shows them
     if s["tz"] is None:
         s["tz"] = zone_label(tz or timezone.utc)
     # the tally pair comes from the most-sampled test command; ties go to the
@@ -506,6 +608,28 @@ DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 HARNESSES = ("claude-code", "codex", "grok", "gemini")
 
 
+# Model ids render only when they have a vendor id shape (shape, not meaning:
+# new models keep working); effort only from the levels harnesses expose.
+# Anything else is user- or tool-chosen text and shows as a neutral label.
+MODEL_ID_RE = re.compile(r"(?:(?:claude|gpt|codex|gemini|grok)-[a-z0-9][a-z0-9.-]*|o[0-9][a-z0-9.-]*)")
+MODEL_ID_MAX = 48
+KNOWN_MODELS = frozenset()          # exact ids outside the vendor shapes, if ever needed
+OTHER_MODEL = "other model"
+EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+OTHER_EFFORT = "other"
+
+
+def display_model(value):
+    v = value if isinstance(value, str) else ""
+    if v in KNOWN_MODELS or (len(v) <= MODEL_ID_MAX and MODEL_ID_RE.fullmatch(v)):
+        return v
+    return OTHER_MODEL
+
+
+def display_effort(value):
+    return value if value in EFFORTS else OTHER_EFFORT
+
+
 def safe_meta(value, limit=40):
     """Model/effort names come from the transcript and are untrusted for
     rendering: strip to a conservative charset before ANSI or HTML output."""
@@ -517,8 +641,13 @@ def clean(value):
     return CONTROL_RE.sub("", str(value))
 
 
-def meta_names(d):
-    return ", ".join(safe_meta(k) for k in sorted(d, key=d.get, reverse=True))
+def meta_names(d, label):
+    names = []
+    for k in sorted(d, key=d.get, reverse=True):
+        shown = OTHER_MODEL if k == OTHER_MODEL and label is display_model else label(k)
+        if shown not in names:
+            names.append(shown)
+    return ", ".join(safe_meta(n) for n in names)
 
 
 def card_fields(s):
@@ -531,8 +660,8 @@ def card_fields(s):
     return {
         "sid": sid,
         "date": date if DATE_RE.fullmatch(date) else "?",
-        "models": meta_names(s.get("models", {})),
-        "efforts": meta_names(s.get("efforts", {})),
+        "models": meta_names(s.get("models", {}), display_model),
+        "efforts": meta_names(s.get("efforts", {}), display_effort),
         "tools": "  ".join(f"{k}:{v}" for k, v in tools),
         "harness": s.get("harness") if s.get("harness") in HARNESSES else "unknown",
         "tz": re.sub(r"[^A-Za-z0-9_+\-/:]", "", str(s.get("tz") or "?"))[:40],
@@ -625,8 +754,9 @@ def pick_buffs(s):
         buffs.append(("Middle Manager", "flavor", 150, f"delegated to {cls['agent']} subagents"))
     if s["compactions"] >= 1:
         buffs.append(("Lost the Tapes", "flavor", 100, f"survived {s['compactions']} compaction(s); records incomplete"))
-    if len(s["models"]) >= 3:
-        buffs.append(("Model Hopper", "flavor", 100, f"{len(s['models'])} different models in one session"))
+    n_models = s.get("model_count", len(s["models"]))
+    if n_models >= 3:
+        buffs.append(("Model Hopper", "flavor", 100, f"{n_models} different models in one session"))
     reads, bashes = cls.get("read", 0), cls.get("shell", 0)
     if reads >= 20 and reads > bashes:
         buffs.append(("Bookworm", "flavor", 50, f"read {reads} files, touched grass never"))
@@ -1206,18 +1336,22 @@ def invoking_ids(env=None):
 
 
 def is_invoking_session(path, live_ids):
-    if not live_ids:
+    """Identity, not display: compares the live ids with the ids in the given
+    name, the resolved target's name, and the transcript's own session id, so
+    neither a symlink alias nor a renamed copy hides the live session."""
+    live = [i.strip().lower() for i in live_ids or () if isinstance(i, str) and i.strip()]
+    if not live:
         return False
-    label = session_label(path)
-    name = Path(path).name.lower()
-    for i in live_ids:
-        i = i.strip().lower()
-        if not i:
-            continue
-        if label and (label == i or (len(i) >= 8 and label.startswith(i))
-                      or (len(label) == 8 and i.startswith(label))):
-            return True
-        if len(i) >= 8 and i in name:
+    ids = identity_ids(path)
+    try:
+        names = {Path(path).name.lower(), Path(path).resolve().name.lower()}
+    except (OSError, RuntimeError):
+        names = {Path(path).name.lower()}
+    for i in live:
+        for sid in ids:
+            if sid == i or (len(i) >= 8 and sid.startswith(i)) or (len(sid) == 8 and i.startswith(sid)):
+                return True
+        if len(i) >= 8 and any(i in n for n in names):
             return True
     return False
 
@@ -1427,8 +1561,9 @@ def check_output(dest, force=False, sources=()):
 
 def write_output(dest, data, force=False, sources=()):
     """Atomic write in the destination's directory. Never follows a symlink
-    destination (the link itself is replaced under --force) and never
-    replaces an existing file without --force."""
+    destination (the link itself is replaced under --force). Without --force
+    the file is published only by an exclusive hard-link create; where the
+    filesystem cannot do that, the write fails closed."""
     dest = Path(dest)
     check_output(dest, force, sources)
     if isinstance(data, str):
@@ -1447,10 +1582,10 @@ def write_output(dest, data, force=False, sources=()):
                 os.link(tmp, dest)          # atomic create: fails if dest appeared
             except FileExistsError:
                 raise OutputError(f"{clean(dest)} already exists; pass --force to replace it")
-            except OSError:
-                if os.path.lexists(dest):
-                    raise OutputError(f"{clean(dest)} already exists; pass --force to replace it")
-                os.replace(tmp, dest)
+            except OSError as exc:
+                raise OutputError(
+                    f"cannot create {clean(dest)} exclusively here ({clean(exc.strerror or exc)}); "
+                    "choose another directory, or pass --force to replace any existing file")
     finally:
         if os.path.lexists(tmp):
             os.unlink(tmp)
@@ -1466,13 +1601,16 @@ def main():
         "newest session per harness and in this project are excluded as a heuristic, "
         "and the pick note says so."))
     ap.add_argument("session", nargs="?", help=(
-        "Path to a session file/dir, or a session-id prefix. A target whose id matches "
-        "this process's harness session id is refused. Omit to auto-pick."))
-    ap.add_argument("--html", nargs="?", const="", metavar="OUT",
-                    help="Also write a shareable standalone HTML card (default: ./terminally-cooked-card-<id>.html)")
-    ap.add_argument("--png", nargs="?", const="", metavar="OUT",
+        "Path to a session file/dir, or a session-id prefix; put the session first "
+        "(grade_session.py a3a4d4fb --png). A target whose id matches this process's "
+        "harness session id is refused. Omit to auto-pick."))
+    ap.add_argument("--html", nargs="?", const="", metavar="OUT.html",
+                    help="Also write a shareable standalone HTML card (default: ./terminally-cooked-card-<id>.html). "
+                         "OUT must end in .html, so a session id is never taken as the destination.")
+    ap.add_argument("--png", nargs="?", const="", metavar="OUT.png",
                     help="Write a tightly cropped PNG of the card and open it (also writes HTML). "
-                         "Local Chrome, launched with background networking and name resolution off; nothing is uploaded.")
+                         "OUT must end in .png. Local Chrome, launched with background networking and "
+                         "name resolution off; nothing is uploaded.")
     ap.add_argument("--force", action="store_true",
                     help="Replace an existing --html/--png destination (a symlink is replaced, never followed)")
     ap.add_argument("--tz", metavar="ZONE",
@@ -1484,6 +1622,10 @@ def main():
     ap.add_argument("--projects-dir", metavar="DIR",
                     help="Claude Code transcript root (default: $CLAUDE_CONFIG_DIR/projects or ~/.claude/projects). Auto-pick still scans Grok/Codex/Gemini under $HOME.")
     args = ap.parse_args()
+    for flag, value, ext in (("--html", args.html, (".html", ".htm")), ("--png", args.png, (".png",))):
+        if value and not value.lower().endswith(ext):
+            ap.error(f"{flag} {clean(value)}: the destination must end in {ext[0]}. "
+                     "Put the session first, e.g. grade_session.py a3a4d4fb {flag}")
     try:
         zone = parse_zone(args.tz) if args.tz else None
     except ValueError as exc:

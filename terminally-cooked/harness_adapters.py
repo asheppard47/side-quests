@@ -9,7 +9,14 @@ session stores on 2026-08-20 (Codex and Grok result envelopes rechecked
 2026-11-01); anything absent in a harness simply never emits its event
 (detectors fail open). Records that are not JSON objects are skipped.
 
+Discriminators (`type`, roles) and correlation ids (tool_use / call ids) are
+validated as strings before any membership test or dict use, so an
+unsupported shape is skipped here rather than crashing the grader.
+
 Normalized events (dicts; every event may carry "ts" ISO-8601):
+  {"kind": "tick"}                                    timing only: one per
+        record with a string timestamp, so duration and windows see the true
+        last timestamp even when deduplication or silence drops the record
   {"kind": "human"}                                   user turn
   {"kind": "interrupt"}                               user interrupted the agent
   {"kind": "tool_call", "id", "name", "cls", "command"}
@@ -102,6 +109,15 @@ def _str(v):
     return v if isinstance(v, str) and v else None
 
 
+def _id(v):
+    """A correlation id usable as a dict key: a non-empty string, else None."""
+    return v if isinstance(v, str) and v else None
+
+
+def _tick(ts):
+    return {"kind": "tick", "ts": ts}
+
+
 def _iter_jsonl(path):
     """JSON objects only: malformed lines and non-object records are skipped."""
     with open(path, encoding="utf-8-sig", errors="replace") as f:
@@ -162,12 +178,13 @@ def detect_harness(path):
     for first in records:
         if not isinstance(first, dict):
             continue
-        if first.get("type") in CODEX_ENVELOPE and "payload" in first:
+        rtype = _str(first.get("type"))
+        if rtype in CODEX_ENVELOPE and "payload" in first:
             return "codex"
         if "sessionId" in first and "projectHash" in first:
             return "gemini"
         # Claude Code's giveaway is its record vocabulary or its home.
-        if "parentUuid" in first or first.get("type") in CLAUDE_TYPES:
+        if "parentUuid" in first or rtype in CLAUDE_TYPES:
             return "claude-code"
     parent = str(p.parent)
     if ".claude" in parent:
@@ -207,6 +224,46 @@ def session_label(path):
     return None
 
 
+def transcript_ids(path, harness=None, limit=50):
+    """Session ids a transcript states about itself, lowercased: Claude record
+    `sessionId`, Codex `session_meta` id, Gemini header `sessionId`, Grok
+    `summary.json` info.id. Unreadable or unsupported shapes give none."""
+    p = Path(path)
+    harness = harness or detect_harness(p)
+    found = set()
+    try:
+        if harness == "grok":
+            info = _dict(_dict(json.loads((p / "summary.json").read_text(
+                encoding="utf-8", errors="replace"))).get("info"))
+            found.add(_id(info.get("id")))
+        elif harness == "codex":
+            meta = _codex_meta(p)
+            found.update((_id(meta.get("id")), _id(meta.get("session_id"))))
+        elif harness in ("claude-code", "gemini"):
+            for n, rec in enumerate(_iter_jsonl(p)):
+                sid = _id(rec.get("sessionId"))
+                found.add(sid)
+                # one id per file in every local Claude store (2026-11-01 check)
+                if sid or harness == "gemini" or n >= limit:
+                    break
+    except (OSError, ValueError, RecursionError):
+        pass
+    return {i.strip().lower() for i in found if i and i.strip()}
+
+
+def identity_ids(path):
+    """Every id that can establish which session a path really is: the id in
+    the name it was given, the id in its resolved target's name, and the ids
+    the transcript states. Identity only; never displayed."""
+    p = Path(path)
+    try:
+        real = p.resolve()
+    except (OSError, RuntimeError):
+        real = p
+    ids = {session_label(p), session_label(real)} | transcript_ids(real)
+    return {i for i in ids if i}
+
+
 def session_identity(path, harness):
     """(session_id or None, files-to-hash). Grok hashes every file that feeds
     the score: events.jsonl, updates.jsonl, and compaction_checkpoints/
@@ -227,7 +284,9 @@ def session_identity(path, harness):
 def _claude_events(path):
     for rec in _iter_jsonl(path):
         ts = rec.get("timestamp")
-        rtype = rec.get("type")
+        if isinstance(ts, str):
+            yield _tick(ts)
+        rtype = _str(rec.get("type"))
         if rec.get("isCompactSummary"):
             yield {"kind": "compaction", "ts": ts}
             continue
@@ -257,7 +316,7 @@ def _claude_events(path):
                     if cls == "shell":
                         c = _dict(block.get("input")).get("command")
                         cmd = c.strip() if isinstance(c, str) else None
-                    yield {"kind": "tool_call", "id": block.get("id"), "name": label,
+                    yield {"kind": "tool_call", "id": _id(block.get("id")), "name": label,
                            "cls": cls, "command": cmd, "ts": ts}
         elif rtype == "user":
             content = _dict(rec.get("message")).get("content")
@@ -280,7 +339,7 @@ def _claude_events(path):
                 yield {"kind": "interrupt", "ts": ts}
             for block in blocks:
                 if block.get("type") == "tool_result":
-                    yield {"kind": "tool_result", "id": block.get("tool_use_id"),
+                    yield {"kind": "tool_result", "id": _id(block.get("tool_use_id")),
                            "success": not block.get("is_error"),
                            "text": _text(block.get("content")), "ts": ts}
 
@@ -350,9 +409,19 @@ def _codex_command(p):
     return None
 
 
+# Context Codex injects as role-user messages. Exact markers only, from the
+# adapter doc and local rollouts (2026-11-01); any other text, tag-wrapped or
+# not, is a person's turn.
+CODEX_CONTEXT_TAGS = ("environment_context", "user_instructions", "heartbeat",
+                      "external_codex_apps_open_page", "in-app-browser-context",
+                      "recommended_plugins", "subagent_notification", "turn_aborted")
+CODEX_CONTEXT_RE = re.compile(r"<(?:%s)[\s>]" % "|".join(map(re.escape, CODEX_CONTEXT_TAGS)))
+CODEX_AGENTS_HEADER = "# AGENTS.md instructions"
+
+
 def _codex_is_human(p):
-    """A role-user message is a person's turn unless every block is
-    harness-injected context (<environment_context>, AGENTS.md, heartbeats)."""
+    """A role-user message is a person's turn unless every text block is a
+    known injected-context record."""
     for b in _list(p.get("content")):
         if not isinstance(b, dict):
             continue
@@ -362,7 +431,7 @@ def _codex_is_human(p):
         if not isinstance(t, str) or not t.strip():
             continue
         t = t.lstrip()
-        if t.startswith("# AGENTS.md instructions") or re.match(r"<[A-Za-z_][\w-]*[ >/]", t):
+        if t.startswith(CODEX_AGENTS_HEADER) or CODEX_CONTEXT_RE.match(t):
             continue
         return True
     return False
@@ -391,7 +460,9 @@ def _codex_events(path):
     last_totals_ts = None    # summing per-snapshot usage double-counts turns
     for rec in _iter_jsonl(path):
         ts = rec.get("timestamp")
-        rtype = rec.get("type")
+        if isinstance(ts, str):
+            yield _tick(ts)
+        rtype = _str(rec.get("type"))
         p = _dict(rec.get("payload"))
         if rtype == "compacted":
             yield {"kind": "compaction", "ts": ts}
@@ -407,7 +478,7 @@ def _codex_events(path):
             if collab.get("kind") == "plan":
                 yield {"kind": "permission", "mode": "plan", "ts": ts}
         elif rtype == "event_msg":
-            st = p.get("type")
+            st = _str(p.get("type"))
             if st == "user_message":
                 yield {"kind": "human", "ts": ts}
             elif st == "turn_aborted":
@@ -417,18 +488,18 @@ def _codex_events(path):
                 if tot:
                     last_totals, last_totals_ts = tot, ts
         elif rtype == "response_item":
-            st = p.get("type")
+            st = _str(p.get("type"))
             if st == "message" and p.get("role") == "user":
                 if not event_humans and _codex_is_human(p):
                     yield {"kind": "human", "ts": ts}
             elif st in ("function_call", "custom_tool_call"):
                 label, cls = tool_label("codex", p.get("name"))
                 cmd = _codex_command(p) if cls == "shell" else None
-                yield {"kind": "tool_call", "id": p.get("call_id"), "name": label,
+                yield {"kind": "tool_call", "id": _id(p.get("call_id")), "name": label,
                        "cls": cls, "command": cmd, "ts": ts}
             elif st in ("function_call_output", "custom_tool_call_output"):
                 out = p.get("output")
-                yield {"kind": "tool_result", "id": p.get("call_id"),
+                yield {"kind": "tool_result", "id": _id(p.get("call_id")),
                        "success": _codex_success(out), "text": _text(out), "ts": ts}
     if last_totals:
         # input_tokens already includes cached tokens (total == input + output)
@@ -480,7 +551,7 @@ def _grok_updates(d):
         u = _grok_unwrap(rec)
         if not isinstance(u, dict):
             continue
-        su = u.get("sessionUpdate")
+        su = _str(u.get("sessionUpdate"))
         if su in ("tool_call", "tool_call_update"):
             cid = u.get("toolCallId")
             if not isinstance(cid, str):
@@ -505,7 +576,9 @@ def _grok_events(path):
     if ev.exists():
         for rec in _iter_jsonl(ev):
             ts = rec.get("ts")
-            rtype = rec.get("type")
+            if isinstance(ts, str):
+                yield _tick(ts)
+            rtype = _str(rec.get("type"))
             if rtype == "turn_started":
                 yield {"kind": "human", "ts": ts}
                 model = _str(rec.get("model_id"))
@@ -550,7 +623,9 @@ def _gemini_events(path):
         if "$set" in rec or ("sessionId" in rec and "projectHash" in rec):
             continue
         ts = rec.get("timestamp")
-        rtype = rec.get("type")
+        if isinstance(ts, str):
+            yield _tick(ts)
+        rtype = _str(rec.get("type"))
         if rtype == "user":
             yield {"kind": "human", "ts": ts}
         elif rtype == "gemini":
@@ -627,7 +702,7 @@ def _codex_meta(path, limit=30):
     n = 0
     for rec in _iter_jsonl(path):
         n += 1
-        if rec.get("type") == "session_meta":
+        if _str(rec.get("type")) == "session_meta":
             return _dict(rec.get("payload"))
         if n >= limit:
             break

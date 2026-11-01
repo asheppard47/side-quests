@@ -24,7 +24,7 @@ This index is the entry point. Each section below owns one stage of the work and
 
 | Dimension | State |
 |---|---|
-| Code | `grade_session.py` + `harness_adapters.py`, scoring v0.6, 92 test functions |
+| Code | `grade_session.py` + `harness_adapters.py`, scoring v0.6, 100 test functions |
 | License | MIT |
 | Repo | `asheppard47/side-quests`, folder `terminally-cooked/` (renamed from `asheppard47/terminally-cooked` 2026-11-01; old URLs redirect) |
 | Catalog | 24 modifiers across 3 classes — [design/modifier-catalog.md](./docs/design/modifier-catalog.md) |

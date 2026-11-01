@@ -1,7 +1,7 @@
 ---
 version: "1.0.0"
 schema_version: 2
-title: "Scoring Model (v0.4)"
+title: "Scoring Model (v0.6)"
 doc_type: detail
 parent: INDEX.md
 last_updated: 2026-11-01
@@ -14,7 +14,7 @@ triggers:
   - "chain multiplier"
   - "clean window chain"
 ---
-# Scoring Model (v0.4)
+# Scoring Model (v0.6)
 
 **Serialized success is the only thing that multiplies, sustained success is the only thing that compounds superlinearly, and everything else adds a flat comedy bonus that can never inflate the rest.** The resulting number is entertainment; it is labeled as such and split on the card into a skill component and a comedy component so the disclaimer is structural rather than a footnote.
 
@@ -71,7 +71,7 @@ The composition matters more than the total: in the second example the two susta
 
 ## What the number does not claim
 
-A tool result that did not error counts as green. That is *execution* success, not task success — a passing command can still be wrong work. Test tallies are only read from commands that invoke a recognized test runner (pytest, jest, cargo test, npm test and similar, including behind `cd … &&`, env assignments, `npx`/`uv run` or `bash -lc`), never from reads or echoes, which stops a card or a log quoting "86 passed" from poisoning the delta. Passed and failed counts are read independently from one summary line in either order; the parse remains a heuristic that fails open, and an unrecognized command is simply unscored. Conditions such as model and effort are displayed and never scored. The score is therefore a joke with arithmetic behind it, not a measurement.
+A tool result that did not error counts as green. That is *execution* success, not task success — a passing command can still be wrong work. Test tallies are only read from a command that is exactly one recognized test-runner invocation (pytest, jest, cargo test, npm test and similar, including behind `cd <dir> &&`, `VAR=value` prefixes, `npx`/`uv run` or `bash -lc`), never from reads or echoes, which stops a card or a log quoting "86 passed" from poisoning the delta. A pipe, a `;`/`&&`/`||` after the runner, command substitution, backticks, a subshell or stdout redirection makes the printed tally unattributable, so that command is unscored; operators are found in the raw string with quoting respected, so a quoted `;` is text. Passed and failed counts are read independently from one summary line in either order; the parse remains a heuristic that fails open, and an unrecognized command is simply unscored. Conditions such as model and effort are displayed and never scored (Model Hopper counts distinct model ids, whatever they display as). The score is therefore a joke with arithmetic behind it, not a measurement.
 
 ## Canonical unit and comparability (v0.5)
 
@@ -79,7 +79,7 @@ A tool result that did not error counts as green. That is *execution* success, n
 
 Comparability is carried by an identity tuple, not the number alone. A shared card states: scoring version, session **division** (blitz &lt;15 min, sprint &lt;2 h, long haul beyond — labels like chess time controls, never normalizers), **delegation class** (a session with subagent calls prints "internals not graded"), duration, and the recompute stamp. Equal totals from different divisions or delegation classes are different games, and the card says so.
 
-Two rules inside the unit keep it honest: only **completed** 20-minute windows qualify for the sustained-skill chain (every window before the one holding the session's latest timestamp has elapsed; that final bucket never counts, so three windows cannot be earned in twenty-one minutes), and test-tally deltas compare only runs of the **same test command**, so a full suite followed by one focused test cannot register as a fictional regression. When two commands were sampled equally often, the larger suite supplies the pair.
+Two rules inside the unit keep it honest: only **completed** 20-minute windows qualify for the sustained-skill chain (every window before the one holding the session's latest timestamp, from any timestamped record, has elapsed; that final bucket never counts, so three windows cannot be earned in twenty-one minutes), and test-tally deltas compare only runs of the **same test command**, so a full suite followed by one focused test cannot register as a fictional regression. When two commands were sampled equally often, the larger suite supplies the pair.
 
 ## Versioning and recomputation
 

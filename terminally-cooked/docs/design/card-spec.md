@@ -25,8 +25,8 @@ triggers:
 | Session identifier | first 8 chars of the id carried by an id-shaped name (Claude `<uuid>.jsonl`, Codex `rollout-…-<uuid>`, Gemini `session-…-<8hex>`, Grok `<uuid>/`); any other name shows the transcript-hash prefix instead | `a3a4d4fb` |
 | Date | first transcript timestamp, date only | `2026-08-19` |
 | Duration | first-to-last timestamp | `5h 55m` |
-| Models | model names, sanitized | `claude-sonnet-5` |
-| Effort levels | effort values, sanitized | `high` |
+| Models | model ids with a vendor id shape (`claude-`, `gpt-`, `o<digit>`, `codex-`, `gemini-`, `grok-` + lowercase letters, digits, dots and dashes, at most 48 characters), else `other model` | `claude-sonnet-5` |
+| Effort levels | one of `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, else `other` | `high` |
 | Event counts | successful tool results, tool errors, longest streak, unknown-outcome results when nonzero | `+36 tool results / 2 errors / streak 22 / ?4 unknown` |
 | Test tally pair | first and last test-shaped tallies | `86 tests passed → 129 tests passed` |
 | Tool histogram | allowlisted tool labels and call counts, top 6; MCP tools show as `MCP`, unrecognized names as `Other` | `Bash:17 Read:4 MCP:2` |
@@ -39,7 +39,7 @@ Forbidden without exception: prompt text, tool output, file paths, repository na
 
 ## Untrusted fields
 
-Every transcript-originated value is attacker-influenced. Model and effort names are stripped to `[A-Za-z0-9._+\- ]` and truncated; tool names never render raw (only built-in labels, `MCP`, or `Other`); session ids must be id-shaped hex; the date must be `YYYY-MM-DD` or it prints `?`; and control characters and bidi overrides are removed from every rendered string. That neutralises HTML injection into the share card and terminal-escape injection into the ANSI card. `test_meta_injection_sanitized`, `test_tool_names_allowlisted`, `test_untrusted_timestamp_never_renders` and `test_adversarial_cli_render_paths` cover it.
+Every transcript-originated value is attacker-influenced. Model ids render only when they have a vendor id shape and effort only from the known levels; anything else shows as `other model` / `other`, because character filtering stops markup but cannot tell a model id from a private repo or MCP server name; tool names never render raw (only built-in labels, `MCP`, or `Other`); session ids must be id-shaped hex; the date must be `YYYY-MM-DD` or it prints `?`; and control characters and bidi overrides are removed from every rendered string. That neutralises HTML injection into the share card and terminal-escape injection into the ANSI card. `test_meta_injection_sanitized`, `test_model_and_effort_metadata_allowlisted`, `test_tool_names_allowlisted`, `test_untrusted_timestamp_never_renders` and `test_adversarial_cli_render_paths` cover it.
 
 ## Layout contract
 

@@ -25,7 +25,9 @@ set. Claude Code sets `CLAUDE_CODE_SESSION_ID` (observed 2026-11-01); the CLI
 recognizes no Gemini CLI variable, so a Gemini-invoked pick is always heuristic.
 
 - **An id is set**: auto-pick excludes that session by id, and an explicit
-  path or id prefix that matches it is refused with an error.
+  path or id prefix that matches it is refused with an error. The match reads
+  the transcript's own session id and follows symlinks, so an alias or a
+  renamed copy of the live session is refused as well.
 - **No id is set**: auto-pick still runs, but it excludes the newest session
   of every harness and the newest Claude transcript in this project as a
   heuristic. The pick note says so. Tell the user the exclusion was a guess,
@@ -38,14 +40,18 @@ silently in its place.
 
 ```bash
 python3 grade_session.py --png                  # auto-pick from today; cropped PNG + HTML
-python3 grade_session.py --png <id-prefix>      # a specific other session
-python3 grade_session.py --png path/to/session  # a file, or a Grok session dir
+python3 grade_session.py <id-prefix> --png      # a specific other session: session first
+python3 grade_session.py path/to/session --png  # a file, or a Grok session dir
 python3 grade_session.py --html                 # HTML only
 python3 grade_session.py --share                # copy a caption locally; user pastes to X
 python3 test_grade_session.py
 ```
 
-Existing card files are never overwritten unless you pass `--force`. `--tz`
+Put the session before the flags: `--png` and `--html` take an optional
+destination, and they refuse one that does not end in `.png` or `.html`, so
+`--png a3a4d4fb` is an error rather than an auto-pick. Existing card files are
+never overwritten unless you pass `--force`; where the folder cannot create a
+file exclusively, the write fails instead of risking an overwrite. `--tz`
 fixes the zone Night Shift reads hours in; the card stamps the zone used.
 
 A Codex rollout file, a Grok session directory, or a Gemini chat file works
@@ -104,7 +110,7 @@ source.
 ## How to invoke
 
 If the user names a known other session, run
-`python3 grade_session.py --png <id-prefix or path>`. Otherwise run
+`python3 grade_session.py <id-prefix or path> --png`. Otherwise run
 `python3 grade_session.py --png` from this repo root, after checking the
 invoker id as above. That writes a cropped PNG of the card (local Chrome with
 its network services off, no upload) and opens it. Do not add a light or paper

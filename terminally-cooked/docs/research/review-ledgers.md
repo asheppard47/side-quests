@@ -103,6 +103,19 @@ Two independent reviewers, GPT-6 Astra and Gemini 4 Argon, read the full code, t
 | Skill and README overstate exclusion, resilience and network claims | CONFIRMED (both) — invoker procedure, "this session" disclosure, tool classes, repair scope and claims rewritten |
 | `--share` does nothing on Linux | DECLINED — out of scope for this wave |
 
+**Pre-push verification (Sol).** A cross-family review of the v0.6 change (GPT-6.1 Sol, static read) returned HOLD with one blocker and seven majors. The owner accepted all eight; each fix carries a regression test that failed first, and all ship inside scoring-v0.6.
+
+| Finding | Ruling |
+|---|---|
+| Symlink alias or renamed copy bypasses recognized invoker exclusion | CONFIRMED, blocker — identity from the given name, the resolved target and the transcript's own session id (Claude `sessionId`, Codex `session_meta`, Gemini header, Grok `info.id`); display label kept separate |
+| Model and effort text such as `acme-private-repo` reaches every card | CONFIRMED — vendor id shapes only (`claude-`, `gpt-`, `o<digit>`, `codex-`, `gemini-`, `grok-`, length-capped), else `other model`; effort from six known levels, else `other`; no fixed model list, so new models keep working |
+| Documented `--png <session>` consumes the session as the destination | CONFIRMED — every example puts the session first; `--png`/`--html` refuse a destination without the card extension |
+| Quoted separators and compound commands manufacture tallies | CONFIRMED — a tally counts only from a lone runner after `cd <dir> &&` / `VAR=value` prefixes; pipes, later chains, substitution, subshells and stdout redirection are unscored; operators found in the raw string with quoting respected |
+| Valid JSON with list-typed `type` or ids crashes the CLI | CONFIRMED — discriminators and correlation ids validated as strings at the adapter boundary |
+| Final timestamps lost to Gemini dedup and Codex final messages | CONFIRMED — a timing-only tick per timestamped record; ticks never touch counts, streaks or Night Shift |
+| XML-prefixed Codex prompts discarded as context | CONFIRMED — exact injected markers only (from local rollouts); `<task>…</task>` is a human turn |
+| No-overwrite fallback can replace a file created in the race window | CONFIRMED — without `--force`, publish only by exclusive hard-link create and fail closed otherwise |
+
 ## Practices worth keeping
 
 - **Review the plan before spending.** The X research plan was reviewed before any metered call; the reviewers rewrote the queries, added anti-promotion filters, and forced observability tagging at collection time. That pass prevented an entire wasted research budget.

@@ -13,11 +13,11 @@ games. The card stamps which adapter produced it.
 git clone https://github.com/asheppard47/side-quests.git
 cd side-quests/terminally-cooked
 python3 grade_session.py --png                  # auto-pick from today; cropped PNG + HTML
-python3 grade_session.py --png a3a4d4fb         # a session-id prefix
-python3 grade_session.py --png path/to/session  # a file, or a Grok session dir
+python3 grade_session.py a3a4d4fb --png         # a session-id prefix (session first)
+python3 grade_session.py path/to/session --png  # a file, or a Grok session dir
 python3 grade_session.py --html                 # standalone HTML card only
 python3 grade_session.py --share                # copy a caption; you paste it
-python3 test_grade_session.py                   # 92 tests
+python3 test_grade_session.py                   # 100 tests
 python3 grade_session.py --help
 ```
 
@@ -62,7 +62,7 @@ both. Sharing a card is something you do. Full contract:
 
 ## Status
 
-Scoring v0.6, 24 modifiers, 92 tests. Known coupling: each CLI's session
+Scoring v0.6, 24 modifiers, 100 tests. Known coupling: each CLI's session
 format can change. Adapters skip malformed lines, non-object records and record
 types they do not know, so format drift usually shows up as a sparser card. A
 shape the guards do not anticipate can still stop a run with an error; report

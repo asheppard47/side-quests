@@ -41,7 +41,7 @@ Tool-result success is **tri-state** (`True | False | None`): unknown outcomes (
 
 No argument takes the auto-pick path; an explicit existing path or id prefix selects that requested session directly, unless its id matches the invoker (below), in which case the CLI refuses with an error. Auto-pick gathers supported primary-session stores and excludes Codex rollouts marked as subagents. It does **not** enumerate `~/.codex/archived_sessions/`.
 
-Live-session exclusion runs over that **unfiltered** list, before any size cap. When `GROK_SESSION_ID`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`, `CLAUDE_SESSION_ID`, or `CLAUDE_CODE_SESSION_ID` matches a candidate's id, that is identity and only the matching session is excluded. When no recognized id matches, exclusion is a disclosed heuristic: the newest session of every harness store and the newest Claude transcript in the current working directory's project folder are all excluded, and the pick note says the exclusion was heuristic. A live session that is not the newest of its harness (an older session still being written while a newer one exists) can still be missed without an id; that is the residual limit.
+Live-session exclusion runs over that **unfiltered** list, before any size cap. When `GROK_SESSION_ID`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`, `CLAUDE_SESSION_ID`, or `CLAUDE_CODE_SESSION_ID` matches a candidate's id, that is identity and only the matching session is excluded. The match uses the id in the given name, the resolved target's name and the transcript's own session id, so an explicit symlink alias or renamed copy of the live session is refused too. When no recognized id matches, exclusion is a disclosed heuristic: the newest session of every harness store and the newest Claude transcript in the current working directory's project folder are all excluded, and the pick note says the exclusion was heuristic. A live session that is not the newest of its harness (an older session still being written while a newer one exists) can still be missed without an id; that is the residual limit.
 
 After exclusions, files over 50 MiB are dropped. The shortlist is today's candidates (newest first) followed by the seven-day lookback (newest first), deduplicated by resolved path and capped at 20 in total, so today's files count toward the cap. If none falls within the lookback by modification time, the lookback is taken from all remaining candidates. Unreadable candidates are skipped.
 
@@ -53,7 +53,7 @@ Final selection uses a candidate's first normalized event timestamp, falling bac
 |---|---|---|
 | `find_session` | resolving a path or UUID prefix, or delegating to auto-pick | rendering a card |
 | `pick_juicy_session` | excluding the invoker by id, or heuristically (newest per harness and in this project) with a note saying so, then selecting from a capped shortlist | proving identity when no id is available |
-| `write_output` | refusing source-file, existing-file and symlink destinations without `--force`; atomic temp-file-and-rename writes | following a symlink destination |
+| `write_output` | refusing source-file, existing-file and symlink destinations without `--force`; publishing by exclusive hard-link create (fail closed where unsupported), or `os.replace` under `--force` | following a symlink destination; check-then-replace |
 | `harness_adapters._iter_jsonl` | streaming JSONL, skipping malformed lines and non-object records | interpreting semantics |
 | `analyze` | one pass producing every observable — counts, streaks, doom-loop runs, cook chain, time windows, tokens, models, effort, compaction, transcript hash | any scoring judgment |
 | `pick_buffs` | the catalog: thresholds, classes, reason strings | arithmetic on the total |
@@ -80,9 +80,11 @@ The single `analyze` pass is deliberate: streaks, spirals, doom-loop runs and wi
 python3 grade_session.py                  # auto-picked candidate
 python3 grade_session.py a3a4d4fb         # by UUID prefix
 python3 grade_session.py path/to/x.jsonl  # explicit path
-python3 grade_session.py --html [out.html] [--force]
-python3 grade_session.py --png [out.png] --tz UTC-07:00
+python3 grade_session.py a3a4d4fb --html [out.html] [--force]
+python3 grade_session.py a3a4d4fb --png [out.png] --tz UTC-07:00
 ```
+
+Put the session first: `--html` and `--png` take an optional destination and refuse one without a `.html`/`.png` extension, so `--png a3a4d4fb` is an error, not an auto-pick that writes over a file named after the session.
 
 Exit is non-zero with a clear message when no transcript matches. `FORCE_COLOR=1` forces ANSI color when stdout is not a TTY.
 
