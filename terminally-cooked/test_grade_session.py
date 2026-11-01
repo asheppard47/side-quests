@@ -1711,18 +1711,26 @@ def test_compound_commands_never_score_tallies():
     assert s["first_tally"] is None, s["first_tally"]
     s = _tally_session(["10 passed", "1000 passed"], cmd="pytest >/dev/null; cat test_report.txt")
     assert s["first_tally"] is None, s["first_tally"]
+    s = _tally_session(["10 passed", "1000 passed"], cmd="pytest | cat -<test_report.txt")
+    assert s["first_tally"] is None, s["first_tally"]
     s = _tally_session(["10 passed", "12 passed"], cmd="cd x && pytest -q")
     assert s["first_tally"] == (10, 0) and s["last_tally"] == (12, 0)
     yes = ["cd x && pytest -q", 'cd "a b" && FOO=1 pytest', "FOO=1 && pytest", "pytest -q 2>&1",
            "pytest 2>/dev/null", "bash -lc 'cd x && pytest -q'", "pytest -k 'a or b; c'",
-           "cd x && cd y && python3 -m pytest", "pytest\n", "pytest < /dev/null",
+           "cd x && cd y && python3 -m pytest", "pytest\n", "pytest | grep -vi warn | tail -n5",
+           "pytest | grep -Ec passed", "pytest | sort -nr | head -c 400", "pytest | tail -20",
            "pytest | tee log", "pytest -q 2>&1 | tail -20", 'cd x && npm test 2>&1 | grep -E "passed|failed"',
            "pytest 2>&1 | grep -v warn | tail -n 5", "pytest | head -3", "pytest | sort | cat", "pytest | less",
            "pytest | tee -a log | tail -5", "pytest | grep -e passed -e failed"]
     no = ["pytest | echo 1000 passed", "pytest | sh -c 'cat report'", "pytest | cat report.txt",
           "pytest | grep passed report.txt", "pytest | tail -5 > out", "pytest | tail -5; cat r.txt",
           "pytest | xargs echo", "pytest | tail $(cat n)", "pytest | printf '9 passed'", "cat r.txt | pytest",
-          "pytest | head -n", "pytest | sort report.txt", "pytest > log", "pytest >> log", "pytest 1>log",
+          "pytest | head -n", "pytest | sort report.txt", "pytest > log",
+          "pytest | cat -<test_report.txt", "pytest | grep -H --label='1000 passed' .",
+          "pytest | sort --files0-from=x", "cat -<r.txt", "pytest | cat -<r.txt", "pytest | tail -5 < r.txt",
+          "pytest < /dev/null", "pytest <<EOF", "pytest | grep -f pats", "pytest | grep -r passed",
+          "pytest | tail -f", "pytest | tail -n +3", "pytest | tee -p log", "pytest | cat -",
+          "pytest | less -R", "pytest | sort -k 2", "pytest | grep -e", "pytest | grep -- passed", "pytest >> log", "pytest 1>log",
           "pytest &> log", "pytest >& log", "pytest; echo done", "pytest && cat report.txt",
           "pytest || true", "pytest &", "echo `pytest`", "pytest $(cat args)", 'pytest "$(cat args)"',
           "(cd x && pytest)", "cd x; pytest", "make build && pytest", "echo ';' pytest",
@@ -1837,6 +1845,24 @@ def test_no_force_publish_fails_closed_without_hardlinks():
         gs.os.link = real
     assert not [p for p in d.iterdir() if p.name.startswith(".tc-")]
 
+
+
+def test_renamed_transcript_without_jsonl_suffix_is_refused():
+    home = Path(tempfile.mkdtemp())
+    d = Path(tempfile.mkdtemp())
+    notes = d / "notes.txt"
+    _write(notes, [dict(r, sessionId=LIVE) for r in
+                   [prompt(), asst([tool_use("Bash", "t", command="ls")]), result("t", "ok")]])
+    xlog = d / "x.log"
+    xlog.write_bytes(Path(_codex_file(_codex_call("c", "shell", "ls", "Exit code: 0\nOutput:\n"),
+                                      sid=LIVE)).read_bytes())
+    for path, env in ((notes, {"CLAUDE_CODE_SESSION_ID": LIVE}), (xlog, {"CODEX_THREAD_ID": LIVE})):
+        assert _refused(path, env, home), f"graded the live session via {path.name}"
+        out = _cli([path, "--projects-dir", home], d, dict(env, TERMINALLY_COOKED_HOME=str(home)))
+        assert out.returncode != 0 and "invoking" in out.stderr, (path.name, out.returncode, out.stderr)
+        assert "TERMINALLY COOKED" not in out.stdout
+    out = _cli([xlog, "--projects-dir", home], d, {"TERMINALLY_COOKED_HOME": str(home)})
+    assert out.returncode == 0 and "codex" in out.stdout.lower(), out.stderr
 
 
 if __name__ == "__main__":

@@ -115,6 +115,9 @@ Two independent reviewers, GPT-6 Astra and Gemini 4 Argon, read the full code, t
 | Final timestamps lost to Gemini dedup and Codex final messages | CONFIRMED — a timing-only tick per timestamped record; ticks never touch counts, streaks or Night Shift |
 | XML-prefixed Codex prompts discarded as context | CONFIRMED — exact injected markers only (from local rollouts); `<task>…</task>` is a human turn |
 | No-overwrite fallback can replace a file created in the race window | CONFIRMED — without `--force`, publish only by exclusive hard-link create and fail closed otherwise |
+| Owner amendment to the compound-command ruling | A trailing pipeline of output filters after the runner counts (`pytest -q 2>&1 \| tail -20`); any other pipeline command still leaves the tally unscored |
+| Repair check (Sol): a transcript renamed without `.jsonl` bypasses invoker exclusion | CONFIRMED, blocker — identity sniffs content under any extension; the grader parses the target by content and re-checks identity on the exact path |
+| Repair check (Sol): filter options replace or inject output (`cat -<file`, `grep -H --label`, `sort --files0-from`) | CONFIRMED — explicit option and operand allowlist per filter; any `<` input redirection is unscored |
 
 ## Practices worth keeping
 

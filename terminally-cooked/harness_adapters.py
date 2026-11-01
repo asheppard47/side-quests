@@ -148,18 +148,21 @@ CLAUDE_TYPES = {"last-prompt", "mode", "permission-mode", "user", "assistant",
                 "attachment", "summary", "file-history-snapshot"}
 
 
-def detect_harness(path):
+def detect_harness(path, any_suffix=False):
     """Return 'claude-code' | 'codex' | 'grok' | 'gemini' | None.
 
     Content-first: sniff up to the first few parseable records (BOM- and
-    blank-line-tolerant), then fall back to home-directory shape."""
+    blank-line-tolerant), then fall back to home-directory shape. Store
+    discovery only considers `.jsonl` files; an explicit target or an
+    identity check passes any_suffix=True so a renamed transcript is still
+    recognized by its content."""
     p = Path(path)
     if p.is_dir():
         if (p / "summary.json").exists() and (
                 (p / "events.jsonl").exists() or (p / "updates.jsonl").exists()):
             return "grok"
         return None
-    if p.suffix != ".jsonl":
+    if p.suffix != ".jsonl" and not any_suffix:
         return None
     records = []
     try:
@@ -229,7 +232,7 @@ def transcript_ids(path, harness=None, limit=50):
     `sessionId`, Codex `session_meta` id, Gemini header `sessionId`, Grok
     `summary.json` info.id. Unreadable or unsupported shapes give none."""
     p = Path(path)
-    harness = harness or detect_harness(p)
+    harness = harness or detect_harness(p, any_suffix=True)
     found = set()
     try:
         if harness == "grok":
@@ -239,7 +242,7 @@ def transcript_ids(path, harness=None, limit=50):
         elif harness == "codex":
             meta = _codex_meta(p)
             found.update((_id(meta.get("id")), _id(meta.get("session_id"))))
-        elif harness in ("claude-code", "gemini"):
+        elif harness in ("claude-code", "gemini") or (harness is None and p.is_file()):
             for n, rec in enumerate(_iter_jsonl(p)):
                 sid = _id(rec.get("sessionId"))
                 found.add(sid)

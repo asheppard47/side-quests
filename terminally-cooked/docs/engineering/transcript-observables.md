@@ -38,7 +38,7 @@ Other supported harnesses have different stores and record shapes; see [harness-
 | Permission mode | `permission-mode` record → `permissionMode` | `bypassPermissions` = YOLO MODE, `plan` = plan entry |
 | Compaction | any record with `isCompactSummary: true` | the verified marker; the summary record is not also counted as a human turn |
 | Timestamps | `timestamp` on most records | duration, night-shift hours, window bucketing |
-| Test tallies | text of a tool result whose command is a lone recognized test-runner invocation | gated by runner invocation; reads, echoes and compound commands (pipes, chains after the runner, substitution, stdout redirection) never count |
+| Test tallies | text of a tool result whose command is a lone recognized test-runner invocation | gated by runner invocation; reads, echoes and compound commands (chains after the runner, non-filter pipeline commands, filter options outside the allowlist, substitution, input redirection, stdout redirection) never count |
 
 ## Corrections worth remembering
 

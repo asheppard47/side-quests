@@ -113,8 +113,8 @@ def _shell_segments(cmd):
 
     Scans the raw string so quoting is respected: a quoted `;` is text, not an
     operator. Raises _Ambiguous for syntax whose output cannot be attributed to
-    a single command: command substitution, backticks, subshells and
-    redirection of stdout."""
+    a single command: command substitution, backticks, subshells, input
+    redirection and redirection of stdout."""
     segs, buf, quote, i, n = [], [], None, 0, len(cmd)
     while i < n:
         ch = cmd[i]
@@ -159,6 +159,8 @@ def _shell_segments(cmd):
             continue
         if ch == "&" and cmd.startswith(">", i + 1):
             raise _Ambiguous                    # `&>`: stdout and stderr to a file
+        if ch == "<":
+            raise _Ambiguous                    # input from a file can stand in for output
         if ch in ";&|\n":
             op = cmd[i:i + 2] if cmd[i:i + 2] in ("&&", "||") else ch
             segs.append(("".join(buf), op))
@@ -173,34 +175,53 @@ def _shell_segments(cmd):
     return segs
 
 
-VALUE_FLAGS = {"head": {"-n", "-c"}, "tail": {"-n", "-c"}, "grep": {"-e", "-f", "-m", "-A", "-B", "-C"},
-               "sort": {"-k", "-t", "-o"}}
+GREP_FLAGS_RE = re.compile(r"-[EFviwxcq]+")
+COUNT_RE = re.compile(r"\d+")
 
 
 def _is_output_filter(words):
-    """A plain command that only cuts down or copies its stdin: no file it
-    could print instead of the runner's output."""
-    head, args, positional = words[0], words[1:], []
-    if head not in ("tail", "head", "grep", "tee", "cat", "less", "more", "sort"):
-        return False
-    takes = VALUE_FLAGS.get(head, set())
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a in takes:
-            i += 2
-            continue
-        if not (a.startswith("-") and len(a) > 1):
-            positional.append(a)
-        i += 1
-    if i > len(args):
-        return False                        # a value flag with no value
+    """A plain command that only cuts down or copies the runner's stdin.
+
+    Explicit allowlist per filter: an option or operand outside it could read
+    another file or print text of its own (grep --label, sort --files0-from),
+    which would let a tally come from somewhere other than the runner."""
+    head, args = words[0], words[1:]
+    if head in ("cat", "less", "more"):
+        return not args
+    if head == "sort":
+        return all(re.fullmatch(r"-[nru]+", a) for a in args)
     if head == "tee":
-        return True                         # file arguments are outputs
+        return all(a == "-a" or not a.startswith("-") for a in args)
+    if head in ("head", "tail"):
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in ("-n", "-c") and i + 1 < len(args) and COUNT_RE.fullmatch(args[i + 1]):
+                i += 2
+            elif re.fullmatch(r"-n?\d+", a):
+                i += 1
+            else:
+                return False
+        return True
     if head == "grep":
-        patterns_by_flag = any(a in ("-e", "-f") for a in args)
-        return len(positional) == (0 if patterns_by_flag else 1)
-    return not positional
+        patterns = by_flag = 0
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "-e":
+                if i + 1 >= len(args):
+                    return False
+                by_flag += 1
+                i += 2
+            elif GREP_FLAGS_RE.fullmatch(a):
+                i += 1
+            elif a.startswith("-"):
+                return False
+            else:
+                patterns += 1
+                i += 1
+        return patterns == 1 if not by_flag else patterns == 0
+    return False
 
 
 def _runner_words(cmd):
@@ -1635,7 +1656,9 @@ def main():
                               claude_projects=claude_root)
     if note:
         print(clean(note), file=sys.stderr)
-    harness = detect_harness(path) or "claude-code"
+    harness = detect_harness(path, any_suffix=True) or "claude-code"
+    if is_invoking_session(path, invoking_ids()):
+        _refuse_invoker(path)
     try:
         s = analyze(path, harness, tz=zone)
     except (OSError, ValueError) as exc:

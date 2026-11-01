@@ -83,7 +83,7 @@ Adapters never pass a raw tool name on. Each `tool_call` event carries a display
 
 The card id comes only from an id-shaped name: a Claude `<uuid>.jsonl` stem, the UUID suffix of a Codex `rollout-<ts>-<uuid>.jsonl`, the 8-hex suffix of a Gemini `session-<ts>-<8hex>.jsonl` (the first 8 characters of its `sessionId`, so a full Gemini session UUID also finds the file), or a Grok `<uuid>/` directory. Any other file or directory name is user-chosen text and is replaced on the card and in output filenames by the transcript-hash prefix.
 
-Identity is separate from that display label. Invoker checks compare the live session id against the id in the name given, the id in the resolved target's name (a symlink alias is followed), and the id the transcript states about itself: Claude record `sessionId`, Codex `session_meta` `id`/`session_id`, the Gemini header `sessionId`, and Grok `summary.json` `info.id`. A renamed copy is therefore still recognized (`harness_adapters.identity_ids`).
+Identity is separate from that display label. Invoker checks compare the live session id against the id in the name given, the id in the resolved target's name (a symlink alias is followed), and the id the transcript states about itself: Claude record `sessionId`, Codex `session_meta` `id`/`session_id`, the Gemini header `sessionId`, and Grok `summary.json` `info.id`. A renamed copy is therefore still recognized, whatever its extension: identity and explicit targets sniff content (`detect_harness(..., any_suffix=True)`), the grader parses the target as the harness its content shows, and `main` re-checks identity on the exact path it grades (`harness_adapters.identity_ids`). Store discovery still lists only `.jsonl` files.
 
 ## Normalization rules (v0.6)
 

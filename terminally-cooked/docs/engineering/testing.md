@@ -18,14 +18,14 @@ triggers:
 **Ninety-two tests run against synthetic transcripts built in-test, covering sequence bookkeeping, privacy, supported harness adapters, auto-pick safeguards, output-file safety, and the PNG renderer.** No test depends on a real session file, so the suite is deterministic and safe to run anywhere.
 
 ```bash
-python3 test_grade_session.py     # 100 tests, self-reporting, exit 1 on failure
+python3 test_grade_session.py     # 101 tests, self-reporting, exit 1 on failure
 ```
 
 ## What is covered
 
 | Area | Tests |
 |---|---|
-| Counting and tallies | basic green/red/streak accounting, test-tally pair extraction, failures-first / semicolon / failure-only summaries, tie-break by suite size, test-runner command recognition (reads, echoes and compound commands rejected, quoted operators respected) |
+| Counting and tallies | basic green/red/streak accounting, test-tally pair extraction, failures-first / semicolon / failure-only summaries, tie-break by suite size, test-runner command recognition (reads, echoes and compound commands rejected, output-filter pipelines accepted only with allowlisted options, input redirection rejected, quoted operators respected) |
 | Doom loop | trigger at three identical failures, non-trigger on different commands, reset by an intervening success |
 | Cook chain | trigger at 50 consecutive green calls, reset by an error, no growth across a human turn |
 | Clean windows | chain built from timestamps, broken by an error, reset by two sparse windows, a window completed by a later non-tool timestamp, a deduplicated Gemini repeat or a Codex final message; timing records never change counts |
@@ -36,7 +36,7 @@ python3 test_grade_session.py     # 100 tests, self-reporting, exit 1 on failure
 | Provenance | transcript hash changes with content and appears in the card; code hash covers both modules; Grok hash covers compaction checkpoints; Night Shift zone is explicit and stamped |
 | Safety | card allowlist leak test, metadata injection sanitisation, model and effort allowlists, filename-derived ids, allowlisted tool labels, ANSI/HTML/path payloads across terminal, HTML, caption and default filename, untrusted dates |
 | Adapters | per-harness fixtures; non-object records skipped (including discovery); Codex envelope outcomes, one human per turn, `apply_patch` not a command; Gemini per-message snapshots; Claude compaction and system-reminder records not human; Codex known context markers only (an XML-prefixed prompt is human); valid JSON with wrong-typed discriminators or ids skipped; Grok tool output text |
-| Selection | invoker excluded by id; explicit targets matching the invoker refused, including symlink aliases and renamed copies (transcript ids); heuristic exclusion over the unfiltered list; stale same-project transcripts cannot shield the live one; analysis cap covers today |
+| Selection | invoker excluded by id; explicit targets matching the invoker refused, including symlink aliases and renamed copies under any extension (transcript ids); heuristic exclusion over the unfiltered list; stale same-project transcripts cannot shield the live one; analysis cap covers today |
 | Output and PNG | source-file, existing-file and symlink destinations refused without `--force`; no-force publication fails closed without hard links; `--png`/`--html` refuse a non-card extension; network-off Chrome flags and CSP; waits for a complete PNG; truncated or corrupt PNGs are a clean error |
 | CLI | end-to-end smoke run |
 
