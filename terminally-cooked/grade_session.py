@@ -224,6 +224,29 @@ def _is_output_filter(words):
     return False
 
 
+def _expands(text):
+    """True when the shell would expand part of this segment: `$` outside
+    single quotes, or a glob, brace or tilde outside any quotes. A filter's
+    arguments must be the literal text the allowlist checked."""
+    quote, i = None, 0
+    while i < len(text):
+        ch = text[i]
+        if quote == "'":
+            quote = None if ch == "'" else quote
+        elif ch == "\\":
+            i += 1
+        elif ch == "$":
+            return True
+        elif quote == '"':
+            quote = None if ch == '"' else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "*?[{~":
+            return True
+        i += 1
+    return False
+
+
 def _runner_words(cmd):
     """Words of the one runner segment of `cmd`, or None when the command is
     not a lone runner after `cd <dir> &&` / `VAR=value &&` prefixes, followed
@@ -240,6 +263,8 @@ def _runner_words(cmd):
     if any(op != "&&" for op in ops[:pipe_at]) or any(op != "|" for op in ops[pipe_at:]):
         return None
     runner, filters = pipe_at, words[pipe_at + 1:]
+    if any(_expands(text) for text, _ in segs[pipe_at + 1:]):
+        return None
     for w in words[:runner]:
         if not ((w[0] == "cd" and len(w) == 2) or all(ASSIGN_RE.match(x) for x in w)):
             return None

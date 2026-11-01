@@ -118,6 +118,7 @@ Two independent reviewers, GPT-6 Astra and Gemini 4 Argon, read the full code, t
 | Owner amendment to the compound-command ruling | A trailing pipeline of output filters after the runner counts (`pytest -q 2>&1 \| tail -20`); any other pipeline command still leaves the tally unscored |
 | Repair check (Sol): a transcript renamed without `.jsonl` bypasses invoker exclusion | CONFIRMED, blocker — identity sniffs content under any extension; the grader parses the target by content and re-checks identity on the exact path |
 | Repair check (Sol): filter options replace or inject output (`cat -<file`, `grep -H --label`, `sort --files0-from`) | CONFIRMED — explicit option and operand allowlist per filter; any `<` input redirection is unscored |
+| Final check (Sol): shell expansion in a filter argument (`grep $FILTER`) turns a pattern into a file read | CONFIRMED — a filter segment with `$` outside single quotes, or an unquoted glob, brace or tilde, is unscored. Sol found no blockers in this round |
 
 ## Practices worth keeping
 
