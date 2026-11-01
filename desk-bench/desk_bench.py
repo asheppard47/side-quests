@@ -180,6 +180,12 @@ def digest(data: bytes) -> str:
 def make_desktop(root: Path, seed: int = DEFAULT_SEED) -> Path:
     """Write the fixture to root/Desktop and record the seed in root."""
     desk = root / "Desktop"
+    state = root / STATE_FILE
+    # Never write through a symlink: it could point outside the sandbox.
+    if root.is_symlink() or desk.is_symlink() or state.is_symlink():
+        raise SystemExit(f"refusing to build through a symlink in {root}")
+    if state.exists():
+        raise SystemExit(f"{root} already holds a DeskBench desktop; pick an empty folder")
     if desk.exists() and any(desk.iterdir()):
         raise SystemExit(f"{desk} already has files in it; pick an empty folder")
     desk.mkdir(parents=True, exist_ok=True)
@@ -190,7 +196,7 @@ def make_desktop(root: Path, seed: int = DEFAULT_SEED) -> Path:
     for d in EMPTY_DIRS:
         (desk / d).mkdir(exist_ok=True)
     (desk / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
-    (root / STATE_FILE).write_text(json.dumps(
+    state.write_text(json.dumps(
         {"seed": seed, "scoring_version": SCORING_VERSION}) + "\n")
     return desk
 
@@ -347,9 +353,13 @@ def score_desktop(desk: Path, seed: int = DEFAULT_SEED) -> dict:
     # Dedupe: extra identical copies removed (at least one copy must survive).
     copies = Counter(it.key for it in items if it.role in ("normal", "dupe"))
     extra_start = sum(n - 1 for n in copies.values() if n > 1)
-    extra_end = sum(max(0, len(found.get(digest(content_for(by_key[k], seed)), [])) - 1)
-                    for k, n in copies.items() if n > 1)
-    dedupe = POINTS["dedupe"] * (extra_start - min(extra_end, extra_start)) / extra_start
+    removed = 0
+    for k, n in copies.items():
+        left = len(found.get(digest(content_for(by_key[k], seed)), []))
+        if n > 1 and left >= 1:  # deleting every copy is data loss, not dedupe
+            removed += max(0, n - left)
+    removed = min(removed, extra_start)
+    dedupe = POINTS["dedupe"] * removed / extra_start
 
     # Cleanup: junk deleted and empty untitled folders gone.
     junk = [it for it in items if it.role == "junk"]
@@ -449,7 +459,7 @@ def score_desktop(desk: Path, seed: int = DEFAULT_SEED) -> dict:
         "facts": {
             "loose_start": start_loose, "loose_end": end_loose,
             "top_folders": n_dirs, "lost": len(lost), "lost_files": lost,
-            "dupes_removed": extra_start - min(extra_end, extra_start),
+            "dupes_removed": removed,
             "dupes_total": extra_start, "junk_removed": junk_gone,
             "junk_total": len(junk), "empties_removed": empties_gone,
             "empties_total": len(EMPTY_DIRS), "placed": len(placed), "renamed": renamed, "new_files": len(new_files),

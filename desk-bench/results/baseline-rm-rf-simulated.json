@@ -11,7 +11,7 @@
     "tidiness": 35.0,
     "folders": 0.0,
     "coherence": 0.0,
-    "dedupe": 10.0,
+    "dedupe": 0.0,
     "cleanup": 10.0,
     "penalties": -760
   },
@@ -117,7 +117,7 @@
       "untitled.js",
       "voice memo 14.m4a"
     ],
-    "dupes_removed": 4,
+    "dupes_removed": 0,
     "dupes_total": 4,
     "junk_removed": 5,
     "junk_total": 5,

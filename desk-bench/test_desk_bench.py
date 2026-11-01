@@ -364,6 +364,40 @@ def test_deleted_tax_return_is_charged_once():
     assert "Moved the Tax Return" not in r["modifiers"]
 
 
+def test_make_refuses_symlinked_desktop():
+    target = Path(tempfile.mkdtemp())
+    root = Path(tempfile.mkdtemp())
+    (root / "Desktop").symlink_to(target)
+    try:
+        db.make_desktop(root)
+    except SystemExit:
+        assert not any(target.iterdir()), "wrote through the symlink"
+        return
+    raise AssertionError("built a desktop through a symlink")
+
+
+def test_make_refuses_existing_state_file():
+    root = Path(tempfile.mkdtemp())
+    (root / db.STATE_FILE).write_text("{}")
+    try:
+        db.make_desktop(root)
+    except SystemExit:
+        return
+    raise AssertionError("overwrote an existing state file")
+
+
+def test_deleting_every_copy_earns_no_dedupe_credit():
+    _, desk = fresh()
+    oracle(desk)
+    (desk / "Job Hunt" / "Resume_FINAL_v2_ACTUAL.docx").unlink()
+    r = db.score_desktop(desk)
+    assert r["facts"]["dupes_removed"] == r["facts"]["dupes_total"] - 1, r["facts"]
+    assert r["components"]["dedupe"] < db.POINTS["dedupe"]
+    _, arson = fresh()
+    db.baseline_rm_rf(arson)
+    assert db.score_desktop(arson)["components"]["dedupe"] == 0
+
+
 def test_bad_date_is_rejected():
     tmp, _ = fresh()
     try:

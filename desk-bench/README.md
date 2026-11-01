@@ -69,7 +69,8 @@ Recipes used for the launch runs:
 codex exec -C "$DESK" -s workspace-write --skip-git-repo-check "$(python3 desk_bench.py prompt)"
 
 # Claude Code: Bash sandbox on, file edits auto-accepted inside the folder
-(cd "$DESK" && claude -p "$(python3 desk_bench.py prompt)" --permission-mode acceptEdits \
+DESK_PROMPT="$(python3 desk_bench.py prompt)"
+(cd "$DESK" && claude -p "$DESK_PROMPT" --permission-mode acceptEdits \
   --settings '{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true}}')
 ```
 
@@ -129,7 +130,7 @@ scripted in the tests scores 100.
 - Self-reported. `results/*.json` holds every run; anyone can reproduce one.
 
 ```bash
-python3 test_desk_bench.py     # 37 tests
+python3 test_desk_bench.py     # 40 tests
 python3 desk_bench.py --help
 ```
 
