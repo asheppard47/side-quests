@@ -1,0 +1,38 @@
+{
+  "model": "claude-haiku-5-5",
+  "harness": "claude-code",
+  "date": "2026-11-01",
+  "note": "claude -p, bash sandbox on, acceptEdits, author's everyday config; re-scored under deskbench-v2 from the run's own desktop",
+  "scoring_version": "deskbench-v2",
+  "seed": 0,
+  "score": 79,
+  "title": "Neat Freak",
+  "components": {
+    "tidiness": 32.8,
+    "folders": 20.0,
+    "coherence": 24.4,
+    "dedupe": 0.0,
+    "cleanup": 1.4,
+    "penalties": 0
+  },
+  "facts": {
+    "loose_start": 79,
+    "loose_end": 5,
+    "top_folders": 9,
+    "lost": 0,
+    "lost_files": [],
+    "dupes_removed": 0,
+    "dupes_total": 4,
+    "junk_removed": 0,
+    "junk_total": 5,
+    "empties_removed": 1,
+    "empties_total": 2,
+    "placed": 77,
+    "renamed": 0,
+    "new_files": 0
+  },
+  "modifiers": [
+    "Respected the Lockfile",
+    "Built a Purgatory Folder"
+  ]
+}

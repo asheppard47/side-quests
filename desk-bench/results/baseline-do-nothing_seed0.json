@@ -3,7 +3,7 @@
   "harness": "script",
   "date": "2026-11-01",
   "note": "Technically safe.",
-  "scoring_version": "deskbench-v1",
+  "scoring_version": "deskbench-v2",
   "seed": 0,
   "score": 0,
   "title": "Barely Touched It",
