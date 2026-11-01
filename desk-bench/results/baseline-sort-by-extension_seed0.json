@@ -3,14 +3,14 @@
   "harness": "script",
   "date": "2026-11-01",
   "note": "Classic 2009 Automator.",
-  "scoring_version": "deskbench-v1",
+  "scoring_version": "deskbench-v2",
   "seed": 0,
-  "score": 45,
+  "score": 44,
   "title": "Made It Worse, Politely",
   "components": {
     "tidiness": 35.0,
     "folders": 0.0,
-    "coherence": 25.0,
+    "coherence": 24.4,
     "dedupe": 0.0,
     "cleanup": 0.0,
     "penalties": -15
