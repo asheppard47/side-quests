@@ -1,5 +1,3 @@
 __pycache__/
 *.pyc
-llm-grader-card-*.html
-terminally-cooked-card-*.html
-terminally-cooked-card-*.png
+.DS_Store

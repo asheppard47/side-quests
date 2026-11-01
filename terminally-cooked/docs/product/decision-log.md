@@ -4,7 +4,7 @@ schema_version: 2
 title: "Decision Log"
 doc_type: detail
 parent: docs/product/INDEX.md
-last_updated: 2026-09-12
+last_updated: 2026-11-01
 last_audit: 2026-08-19
 audit_status: needs-review
 domain: docs
@@ -40,6 +40,7 @@ triggers:
 | D17 | 2026-08-20 | **Four harnesses, one event contract.** Claude Code, Codex, Grok, and Gemini CLI are auto-detected from file shape. Cards stamp the adapter. Cross-harness scores are different games and say so. Unknown tool outcomes never fill a "clean" window. | Vendor-model adapter wave + validation repairs |
 | D18 | 2026-08-20 | **Public MIT source is the anti-cheat.** Scoring is self-attested and reproducible locally (D15). The repo is public so anyone can recompute a card. Badge PNGs ship in the clone and are inlined as data URIs — grading must never hit the network. | Owner publication directives |
 | D19 | 2026-08-20 | **Public name is Terminally Cooked — An AI Coding Session Roast.** GitHub slug `terminally-cooked`. Working title LLM Grader retired (collides with a student-work grader and claims measurement). Promptmortem rejected on uniqueness (`promptmortem.ai` is the same audience). RoastDiff rejected as roast-your-diffs category confusion. Council record: local `council_llm_grader_name_20260820.md`. | Council (sol × 3 personae) + naming-playbook collision screen |
+| D20 | 2026-11-01 | **Repo becomes `asheppard47/side-quests`; this product moves to `terminally-cooked/`.** Renamed in place (history kept, old URLs redirect) so other joke projects can sit beside it. D5 and binding constraint 3 still cover people's sessions: no leaderboard of users ever. The sibling `desk-bench/` ranks models on a fixed fake desktop, which is a different game and does not reverse D5. | Owner |
 
 ## Open questions
 

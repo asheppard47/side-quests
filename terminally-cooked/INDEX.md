@@ -4,7 +4,7 @@ schema_version: 2
 title: "Terminally Cooked — Doc Tree"
 doc_type: index
 parent: null
-last_updated: 2026-09-12
+last_updated: 2026-11-01
 last_audit: 2026-08-19
 audit_status: needs-review
 domain: docs
@@ -26,7 +26,7 @@ This index is the entry point. Each section below owns one stage of the work and
 |---|---|
 | Code | `grade_session.py` + `harness_adapters.py`, scoring v0.5, 57 test functions |
 | License | MIT |
-| Repo | `asheppard47/terminally-cooked` |
+| Repo | `asheppard47/side-quests`, folder `terminally-cooked/` (renamed from `asheppard47/terminally-cooked` 2026-11-01; old URLs redirect) |
 | Catalog | 24 modifiers across 3 classes — [design/modifier-catalog.md](./docs/design/modifier-catalog.md) |
 | Badge art | Voted winners in `assets/badges/`, inlined as data URIs — [art/voting-protocol.md](./docs/art/voting-protocol.md) |
 | Harnesses | Claude Code, Codex, Grok, Gemini CLI — card stamps the adapter |

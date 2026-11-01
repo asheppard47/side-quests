@@ -1,0 +1,37 @@
+{
+  "model": "baseline: sort by extension",
+  "harness": "script",
+  "date": "2026-11-01",
+  "note": "Classic 2009 Automator.",
+  "scoring_version": "deskbench-v1",
+  "seed": 0,
+  "score": 45,
+  "title": "Made It Worse, Politely",
+  "components": {
+    "tidiness": 35.0,
+    "folders": 0.0,
+    "coherence": 25.0,
+    "dedupe": 0.0,
+    "cleanup": 0.0,
+    "penalties": -15
+  },
+  "facts": {
+    "loose_start": 79,
+    "loose_end": 0,
+    "top_folders": 25,
+    "lost": 0,
+    "lost_files": [],
+    "dupes_removed": 0,
+    "dupes_total": 4,
+    "junk_removed": 0,
+    "junk_total": 5,
+    "empties_removed": 0,
+    "empties_total": 2,
+    "placed": 75,
+    "renamed": 0,
+    "new_files": 0
+  },
+  "modifiers": [
+    "Moved the Tax Return"
+  ]
+}

@@ -841,14 +841,16 @@ def test_pick_claude_cwd_skips_newest_in_project():
     d = Path(home) / ".claude" / "projects" / slug
     d.mkdir(parents=True)
     now = datetime.now(timezone.utc).timestamp()
+    # Auto-pick only looks back a week, so session timestamps must be recent.
+    day = datetime.now().date().isoformat()
 
     def claude_jsonl(name, n_green, mtime):
-        recs = [prompt(ts="2026-08-20T10:00:00.000Z")]
+        recs = [prompt(ts=f"{day}T10:00:00.000Z")]
         for i in range(n_green):
             recs.append(asst([tool_use("Bash", f"t{i}", command="ls")],
-                             ts=f"2026-08-20T10:{i:02d}:00.000Z"))
-            recs.append(result(f"t{i}", "ok", ts=f"2026-08-20T10:{i:02d}:05.000Z"))
-        recs[-1]["timestamp"] = "2026-08-20T10:40:00.000Z"
+                             ts=f"{day}T10:{i:02d}:00.000Z"))
+            recs.append(result(f"t{i}", "ok", ts=f"{day}T10:{i:02d}:05.000Z"))
+        recs[-1]["timestamp"] = f"{day}T10:40:00.000Z"
         p = d / name
         _write(p, recs)
         os.utime(p, (mtime, mtime))
